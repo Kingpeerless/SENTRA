@@ -13,8 +13,76 @@ import {
 export interface AgentRecord extends Agent {
   name: string;
   description: string;
+  authorizedNearAccountId: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export const AUTHORIZATION_INTENT_STATES = [
+  "issued",
+  "verifying",
+  "verified",
+  "failed",
+  "indeterminate",
+  "expired",
+  "stale",
+] as const;
+export type AuthorizationIntentState = (typeof AUTHORIZATION_INTENT_STATES)[number];
+
+export interface AuthorizationIntentRecord {
+  id: string;
+  transactionId: string;
+  decisionId: string;
+  approvalId: string | null;
+  tokenHash: string;
+  policyId: string;
+  policyVersion: string;
+  authorizedWalletAccountId: string;
+  expiresAt: string;
+  createdAt: string;
+  state: AuthorizationIntentState;
+  transactionHash: string | null;
+  claimedSignerAccountId: string | null;
+  consumedAt: string | null;
+}
+
+export interface NewAuthorizationIntent {
+  transactionId: string;
+  decisionId: string;
+  approvalId: string | null;
+  tokenHash: string;
+  policyId: string;
+  policyVersion: string;
+  authorizedWalletAccountId: string;
+  expiresAt: string;
+}
+
+export interface ChainVerificationRecord {
+  id: string;
+  authorizationIntentId: string;
+  transactionHash: string;
+  status: "verified" | "failed" | "unverified";
+  reason: string;
+  observedSignerAccountId: string | null;
+  observedReceiverAccountId: string | null;
+  observedAmountYocto: string | null;
+  createdAt: string;
+  verifiedAt: string;
+}
+
+export interface NewChainVerification {
+  authorizationIntentId: string;
+  transactionHash: string;
+  status: ChainVerificationRecord["status"];
+  reason: string;
+  observedSignerAccountId: string | null;
+  observedReceiverAccountId: string | null;
+  observedAmountYocto: string | null;
+  verifiedAt: string;
+}
+
+export interface CompletedChainVerification extends ChainVerificationRecord {
+  authorizationIntentState: AuthorizationIntentState;
 }
 
 export interface PolicyRecord extends Policy {
@@ -207,8 +275,66 @@ const SCHEMA = `
     END;
 `;
 
+const LATEST_SCHEMA_VERSION = 3;
+const NEAR_ACCOUNT_ID_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
+const NEAR_TRANSACTION_HASH_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
+
 function now(): string {
   return new Date().toISOString();
+}
+
+export function isValidNearAccountId(value: string): boolean {
+  return value.length >= 2 && value.length <= 64 && NEAR_ACCOUNT_ID_PATTERN.test(value);
+}
+
+function decodeAuthorizationIntent(
+  row: Record<string, unknown> | undefined,
+): AuthorizationIntentRecord | undefined {
+  if (!row) return undefined;
+  return {
+    id: String(row.id),
+    transactionId: String(row.transaction_id),
+    decisionId: String(row.decision_id),
+    approvalId: row.approval_id === null ? null : String(row.approval_id),
+    tokenHash: String(row.token_hash),
+    policyId: String(row.policy_id),
+    policyVersion: String(row.policy_version),
+    authorizedWalletAccountId: String(row.authorized_wallet_account_id),
+    expiresAt: String(row.expires_at),
+    createdAt: String(row.created_at),
+    state: row.state as AuthorizationIntentState,
+    transactionHash: row.transaction_hash === null ? null : String(row.transaction_hash),
+    claimedSignerAccountId:
+      row.claimed_signer_account_id === null
+        ? null
+        : String(row.claimed_signer_account_id),
+    consumedAt: row.consumed_at === null ? null : String(row.consumed_at),
+  };
+}
+
+function decodeChainVerification(
+  row: Record<string, unknown> | undefined,
+): ChainVerificationRecord | undefined {
+  if (!row) return undefined;
+  return {
+    id: String(row.id),
+    authorizationIntentId: String(row.authorization_intent_id),
+    transactionHash: String(row.transaction_hash),
+    status: row.status as ChainVerificationRecord["status"],
+    reason: String(row.reason),
+    observedSignerAccountId:
+      row.observed_signer_account_id === null
+        ? null
+        : String(row.observed_signer_account_id),
+    observedReceiverAccountId:
+      row.observed_receiver_account_id === null
+        ? null
+        : String(row.observed_receiver_account_id),
+    observedAmountYocto:
+      row.observed_amount_yocto === null ? null : String(row.observed_amount_yocto),
+    createdAt: String(row.created_at),
+    verifiedAt: String(row.verified_at),
+  };
 }
 
 function decodePolicy(row: Record<string, unknown> | undefined): PolicyRecord | undefined {
@@ -230,6 +356,10 @@ function decodeAgent(row: Record<string, unknown> | undefined): AgentRecord | un
     id: String(row.id),
     name: String(row.name),
     description: String(row.description),
+    authorizedNearAccountId:
+      row.authorized_near_account_id === null || row.authorized_near_account_id === undefined
+        ? null
+        : String(row.authorized_near_account_id),
     enabled: Number(row.enabled) === 1,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
@@ -259,10 +389,437 @@ export class SentraDatabase {
     this.connection.pragma("foreign_keys = ON");
     this.connection.pragma("journal_mode = WAL");
     this.connection.exec(SCHEMA);
+    this.migrate();
   }
 
   close(): void {
     this.connection.close();
+  }
+
+  private migrate(): void {
+    const version = this.connection.pragma("user_version", { simple: true }) as number;
+    if (version > LATEST_SCHEMA_VERSION) {
+      throw new Error(`Database schema version ${version} is newer than supported.`);
+    }
+
+    if (version < 1) {
+      const migration = this.connection.transaction(() => {
+        this.connection.exec(`
+          ALTER TABLE agents ADD COLUMN authorized_near_account_id TEXT
+            CHECK (
+              authorized_near_account_id IS NULL OR (
+                length(authorized_near_account_id) BETWEEN 2 AND 64
+                AND authorized_near_account_id = lower(authorized_near_account_id)
+                AND authorized_near_account_id NOT GLOB '*[^a-z0-9._-]*'
+              )
+            );
+          CREATE UNIQUE INDEX idx_agents_authorized_near_account
+            ON agents(authorized_near_account_id)
+            WHERE authorized_near_account_id IS NOT NULL;
+
+          CREATE TABLE authorization_intents (
+            id TEXT PRIMARY KEY,
+            transaction_id TEXT NOT NULL REFERENCES transactions(id) ON DELETE RESTRICT,
+            decision_id TEXT NOT NULL REFERENCES decisions(id) ON DELETE RESTRICT,
+            approval_id TEXT UNIQUE REFERENCES approvals(id) ON DELETE RESTRICT,
+            token_hash TEXT NOT NULL UNIQUE
+              CHECK (length(token_hash) = 64 AND token_hash NOT GLOB '*[^0-9a-f]*'),
+            policy_id TEXT NOT NULL REFERENCES policies(id) ON DELETE RESTRICT,
+            policy_version TEXT NOT NULL,
+            authorized_wallet_account_id TEXT NOT NULL
+              CHECK (
+                length(authorized_wallet_account_id) BETWEEN 2 AND 64
+                AND authorized_wallet_account_id = lower(authorized_wallet_account_id)
+                AND authorized_wallet_account_id NOT GLOB '*[^a-z0-9._-]*'
+              ),
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (
+              state IN ('issued', 'verifying', 'verified', 'failed', 'indeterminate', 'expired', 'stale')
+            ),
+            transaction_hash TEXT,
+            claimed_signer_account_id TEXT,
+            consumed_at TEXT,
+            CHECK (
+              (transaction_hash IS NULL AND claimed_signer_account_id IS NULL)
+              OR (transaction_hash IS NOT NULL AND claimed_signer_account_id IS NOT NULL)
+            ),
+            CHECK (
+              state != 'verifying'
+              OR (transaction_hash IS NOT NULL AND claimed_signer_account_id IS NOT NULL)
+            ),
+            CHECK (
+              state NOT IN ('verified', 'failed', 'expired', 'stale')
+              OR consumed_at IS NOT NULL
+            )
+          );
+
+          CREATE INDEX idx_authorization_intents_transaction
+            ON authorization_intents(transaction_id, created_at DESC);
+          CREATE INDEX idx_authorization_intents_state_expiry
+            ON authorization_intents(state, expires_at);
+
+          CREATE TABLE chain_verifications (
+            id TEXT PRIMARY KEY,
+            authorization_intent_id TEXT NOT NULL
+              REFERENCES authorization_intents(id) ON DELETE RESTRICT,
+            transaction_hash TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL CHECK (status IN ('verified', 'failed', 'unverified')),
+            reason TEXT NOT NULL,
+            observed_signer_account_id TEXT,
+            observed_receiver_account_id TEXT,
+            observed_amount_yocto TEXT
+              CHECK (
+                observed_amount_yocto IS NULL OR (
+                  length(observed_amount_yocto) > 0
+                  AND observed_amount_yocto NOT GLOB '*[^0-9]*'
+                )
+              ),
+            created_at TEXT NOT NULL,
+            verified_at TEXT NOT NULL
+          );
+
+          CREATE INDEX idx_chain_verifications_intent
+            ON chain_verifications(authorization_intent_id, created_at DESC);
+
+          CREATE TRIGGER authorization_intents_validate_insert
+            BEFORE INSERT ON authorization_intents
+            BEGIN
+              SELECT CASE WHEN NOT EXISTS (
+                SELECT 1
+                FROM transactions t
+                JOIN decisions d ON d.id = NEW.decision_id AND d.transaction_id = t.id
+                JOIN policies p ON p.id = NEW.policy_id
+                  AND p.agent_id = t.agent_id
+                  AND CAST(p.version AS TEXT) = NEW.policy_version
+                JOIN agents a ON a.id = t.agent_id
+                  AND a.authorized_near_account_id = NEW.authorized_wallet_account_id
+                WHERE t.id = NEW.transaction_id
+                  AND d.policy_id = NEW.policy_id
+                  AND d.policy_version = NEW.policy_version
+                  AND d.decision IN ('ALLOW', 'WARN')
+                  AND a.enabled = 1
+                  AND p.version = (
+                    SELECT MAX(current_policy.version)
+                    FROM policies current_policy
+                    WHERE current_policy.agent_id = p.agent_id
+                  )
+                  AND (
+                    (d.decision = 'ALLOW' AND NEW.approval_id IS NULL)
+                    OR (
+                      d.decision = 'WARN'
+                      AND EXISTS (
+                        SELECT 1 FROM approvals ap
+                        WHERE ap.id = NEW.approval_id
+                          AND ap.decision_id = d.id
+                          AND ap.status = 'approved'
+                      )
+                    )
+                  )
+              ) THEN RAISE(ABORT, 'authorization intent does not match eligible records') END;
+            END;
+
+          CREATE TRIGGER authorization_intents_validate_transition
+            BEFORE UPDATE OF state ON authorization_intents
+            WHEN NOT (
+              (OLD.state = 'issued' AND NEW.state IN ('verifying', 'expired', 'stale'))
+              OR (OLD.state = 'indeterminate' AND NEW.state IN ('verifying', 'expired', 'stale'))
+              OR (OLD.state = 'verifying' AND NEW.state IN ('verified', 'failed', 'indeterminate'))
+            )
+            BEGIN
+              SELECT RAISE(ABORT, 'invalid authorization intent state transition');
+            END;
+
+          CREATE TRIGGER authorization_intents_protect_snapshot
+            BEFORE UPDATE OF transaction_id, decision_id, approval_id, token_hash,
+              policy_id, policy_version, authorized_wallet_account_id, expires_at, created_at
+            ON authorization_intents
+            BEGIN
+              SELECT RAISE(ABORT, 'authorization intent snapshot is immutable');
+            END;
+        `);
+        this.connection.pragma("user_version = 1");
+      });
+      migration.immediate();
+    }
+
+    if (version < 2) {
+      const migration = this.connection.transaction(() => {
+        this.connection.exec(`
+          CREATE TRIGGER agents_validate_near_account_insert
+            BEFORE INSERT ON agents
+            WHEN NEW.authorized_near_account_id IS NOT NULL AND NOT (
+              length(NEW.authorized_near_account_id) BETWEEN 2 AND 64
+              AND NEW.authorized_near_account_id = lower(NEW.authorized_near_account_id)
+              AND substr(NEW.authorized_near_account_id, 1, 1) GLOB '[a-z0-9]'
+              AND substr(NEW.authorized_near_account_id, -1, 1) GLOB '[a-z0-9]'
+              AND NEW.authorized_near_account_id NOT GLOB '*[^a-z0-9._-]*'
+              AND instr(NEW.authorized_near_account_id, '..') = 0
+              AND instr(NEW.authorized_near_account_id, '._') = 0
+              AND instr(NEW.authorized_near_account_id, '.-') = 0
+              AND instr(NEW.authorized_near_account_id, '_.') = 0
+              AND instr(NEW.authorized_near_account_id, '__') = 0
+              AND instr(NEW.authorized_near_account_id, '_-') = 0
+              AND instr(NEW.authorized_near_account_id, '-.') = 0
+              AND instr(NEW.authorized_near_account_id, '-_') = 0
+              AND instr(NEW.authorized_near_account_id, '--') = 0
+            )
+            BEGIN
+              SELECT RAISE(ABORT, 'invalid authorized NEAR account ID');
+            END;
+
+          CREATE TRIGGER agents_validate_near_account_update
+            BEFORE UPDATE OF authorized_near_account_id ON agents
+            WHEN NEW.authorized_near_account_id IS NOT NULL AND NOT (
+              length(NEW.authorized_near_account_id) BETWEEN 2 AND 64
+              AND NEW.authorized_near_account_id = lower(NEW.authorized_near_account_id)
+              AND substr(NEW.authorized_near_account_id, 1, 1) GLOB '[a-z0-9]'
+              AND substr(NEW.authorized_near_account_id, -1, 1) GLOB '[a-z0-9]'
+              AND NEW.authorized_near_account_id NOT GLOB '*[^a-z0-9._-]*'
+              AND instr(NEW.authorized_near_account_id, '..') = 0
+              AND instr(NEW.authorized_near_account_id, '._') = 0
+              AND instr(NEW.authorized_near_account_id, '.-') = 0
+              AND instr(NEW.authorized_near_account_id, '_.') = 0
+              AND instr(NEW.authorized_near_account_id, '__') = 0
+              AND instr(NEW.authorized_near_account_id, '_-') = 0
+              AND instr(NEW.authorized_near_account_id, '-.') = 0
+              AND instr(NEW.authorized_near_account_id, '-_') = 0
+              AND instr(NEW.authorized_near_account_id, '--') = 0
+            )
+            BEGIN
+              SELECT RAISE(ABORT, 'invalid authorized NEAR account ID');
+            END;
+
+          CREATE TRIGGER authorization_intents_validate_initial_state
+            BEFORE INSERT ON authorization_intents
+            WHEN NEW.state != 'issued'
+            BEGIN
+              SELECT RAISE(ABORT, 'new authorization intents must start in issued state');
+            END;
+
+          CREATE TRIGGER authorization_intents_validate_wallet_snapshot
+            BEFORE INSERT ON authorization_intents
+            WHEN NOT (
+              length(NEW.authorized_wallet_account_id) BETWEEN 2 AND 64
+              AND NEW.authorized_wallet_account_id = lower(NEW.authorized_wallet_account_id)
+              AND substr(NEW.authorized_wallet_account_id, 1, 1) GLOB '[a-z0-9]'
+              AND substr(NEW.authorized_wallet_account_id, -1, 1) GLOB '[a-z0-9]'
+              AND NEW.authorized_wallet_account_id NOT GLOB '*[^a-z0-9._-]*'
+              AND instr(NEW.authorized_wallet_account_id, '..') = 0
+              AND instr(NEW.authorized_wallet_account_id, '._') = 0
+              AND instr(NEW.authorized_wallet_account_id, '.-') = 0
+              AND instr(NEW.authorized_wallet_account_id, '_.') = 0
+              AND instr(NEW.authorized_wallet_account_id, '__') = 0
+              AND instr(NEW.authorized_wallet_account_id, '_-') = 0
+              AND instr(NEW.authorized_wallet_account_id, '-.') = 0
+              AND instr(NEW.authorized_wallet_account_id, '-_') = 0
+              AND instr(NEW.authorized_wallet_account_id, '--') = 0
+            )
+            BEGIN
+              SELECT RAISE(ABORT, 'invalid authorization wallet account ID');
+            END;
+
+          CREATE TRIGGER authorization_intents_validate_current_authorization
+            BEFORE UPDATE OF state ON authorization_intents
+            WHEN NEW.state = 'verifying' AND NOT EXISTS (
+              SELECT 1
+              FROM transactions t
+              JOIN decisions d ON d.id = NEW.decision_id AND d.transaction_id = t.id
+              JOIN policies p ON p.id = NEW.policy_id
+                AND p.agent_id = t.agent_id
+                AND CAST(p.version AS TEXT) = NEW.policy_version
+              JOIN agents a ON a.id = t.agent_id
+                AND a.enabled = 1
+                AND a.authorized_near_account_id = NEW.authorized_wallet_account_id
+              WHERE t.id = NEW.transaction_id
+                AND d.policy_id = NEW.policy_id
+                AND d.policy_version = NEW.policy_version
+                AND p.version = (
+                  SELECT MAX(current_policy.version)
+                  FROM policies current_policy
+                  WHERE current_policy.agent_id = p.agent_id
+                )
+                AND (
+                  (d.decision = 'ALLOW' AND NEW.approval_id IS NULL)
+                  OR (
+                    d.decision = 'WARN'
+                    AND EXISTS (
+                      SELECT 1 FROM approvals ap
+                      WHERE ap.id = NEW.approval_id
+                        AND ap.decision_id = d.id
+                        AND ap.status = 'approved'
+                    )
+                  )
+                )
+                AND julianday(NEW.expires_at) > julianday('now')
+            )
+            BEGIN
+              SELECT RAISE(ABORT, 'authorization intent is stale or no longer eligible');
+            END;
+
+          DROP TRIGGER authorization_intents_validate_transition;
+          CREATE TRIGGER authorization_intents_validate_transition
+            BEFORE UPDATE OF state ON authorization_intents
+            WHEN NOT (
+              (OLD.state = 'issued' AND NEW.state IN ('verifying', 'expired', 'stale'))
+              OR (OLD.state = 'indeterminate' AND NEW.state IN ('verifying', 'expired', 'stale'))
+              OR (OLD.state = 'verifying' AND NEW.state IN ('verified', 'failed', 'indeterminate', 'stale'))
+            )
+            BEGIN
+              SELECT RAISE(ABORT, 'invalid authorization intent state transition');
+            END;
+
+          CREATE TRIGGER authorization_intents_protect_claim
+            BEFORE UPDATE OF transaction_hash, claimed_signer_account_id
+            ON authorization_intents
+            WHEN NOT (
+              (
+                OLD.state = 'issued'
+                AND NEW.state = 'verifying'
+                AND OLD.transaction_hash IS NULL
+                AND OLD.claimed_signer_account_id IS NULL
+                AND NEW.transaction_hash IS NOT NULL
+                AND NEW.claimed_signer_account_id = NEW.authorized_wallet_account_id
+              )
+              OR (
+                OLD.state = 'indeterminate'
+                AND NEW.state = 'verifying'
+                AND OLD.transaction_hash = NEW.transaction_hash
+                AND OLD.claimed_signer_account_id = NEW.claimed_signer_account_id
+              )
+            )
+            BEGIN
+              SELECT RAISE(ABORT, 'authorization intent claim is immutable');
+            END;
+
+          CREATE TRIGGER agents_invalidate_outstanding_intents
+            AFTER UPDATE OF enabled, authorized_near_account_id ON agents
+            WHEN OLD.enabled != NEW.enabled
+              OR OLD.authorized_near_account_id IS NOT NEW.authorized_near_account_id
+            BEGIN
+              INSERT INTO audit_logs (id, event_type, entity_type, entity_id, details, created_at)
+              SELECT lower(hex(randomblob(16))), 'authorization_intent.stale',
+                'authorization_intent', i.id,
+                json_object(
+                  'reason',
+                  CASE
+                    WHEN OLD.enabled = 1 AND NEW.enabled = 0 THEN 'agent_disabled'
+                    WHEN OLD.authorized_near_account_id IS NOT NEW.authorized_near_account_id
+                      THEN 'wallet_binding_changed'
+                    ELSE 'agent_authorization_changed'
+                  END,
+                  'agentId', NEW.id
+                ),
+                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              FROM authorization_intents i
+              JOIN transactions t ON t.id = i.transaction_id
+              WHERE t.agent_id = NEW.id AND i.state IN ('issued', 'indeterminate');
+
+              UPDATE authorization_intents
+              SET state = 'stale', consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              WHERE state IN ('issued', 'indeterminate')
+                AND transaction_id IN (
+                  SELECT id FROM transactions WHERE agent_id = NEW.id
+                );
+            END;
+
+          CREATE TRIGGER policies_invalidate_outstanding_intents
+            AFTER INSERT ON policies
+            WHEN NEW.version = (
+              SELECT MAX(version) FROM policies WHERE agent_id = NEW.agent_id
+            )
+            BEGIN
+              INSERT INTO audit_logs (id, event_type, entity_type, entity_id, details, created_at)
+              SELECT lower(hex(randomblob(16))), 'authorization_intent.stale',
+                'authorization_intent', i.id,
+                json_object(
+                  'reason', 'policy_version_changed',
+                  'previousPolicyVersion', i.policy_version,
+                  'currentPolicyVersion', CAST(NEW.version AS TEXT)
+                ),
+                strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              FROM authorization_intents i
+              JOIN transactions t ON t.id = i.transaction_id
+              WHERE t.agent_id = NEW.agent_id
+                AND i.state IN ('issued', 'indeterminate')
+                AND i.policy_version != CAST(NEW.version AS TEXT);
+
+              UPDATE authorization_intents
+              SET state = 'stale', consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+              WHERE state IN ('issued', 'indeterminate')
+                AND policy_version != CAST(NEW.version AS TEXT)
+                AND transaction_id IN (
+                  SELECT id FROM transactions WHERE agent_id = NEW.agent_id
+                );
+            END;
+        `);
+        this.connection.pragma("user_version = 2");
+      });
+      migration.immediate();
+    }
+
+    if (version < 3) {
+      const migration = this.connection.transaction(() => {
+        this.connection.exec(`
+          DROP TRIGGER authorization_intents_validate_insert;
+          CREATE TRIGGER authorization_intents_validate_insert
+            BEFORE INSERT ON authorization_intents
+            BEGIN
+              SELECT CASE WHEN NOT EXISTS (
+                SELECT 1
+                FROM transactions t
+                JOIN decisions d
+                  ON d.id = NEW.decision_id
+                  AND d.transaction_id = t.id
+                  AND d.policy_id = NEW.policy_id
+                  AND d.policy_version = NEW.policy_version
+                JOIN policies p
+                  ON p.id = NEW.policy_id
+                  AND p.agent_id = t.agent_id
+                  AND CAST(p.version AS TEXT) = NEW.policy_version
+                  AND p.version = (
+                    SELECT MAX(current_policy.version)
+                    FROM policies current_policy
+                    WHERE current_policy.agent_id = p.agent_id
+                  )
+                JOIN agents a
+                  ON a.id = t.agent_id
+                  AND a.enabled = 1
+                  AND a.authorized_near_account_id = NEW.authorized_wallet_account_id
+                WHERE t.id = NEW.transaction_id
+                  AND t.status = d.decision
+                  AND d.decision IN ('ALLOW', 'WARN')
+                  AND (
+                    (
+                      d.decision = 'ALLOW'
+                      AND NEW.approval_id IS NULL
+                    )
+                    OR (
+                      d.decision = 'WARN'
+                      AND EXISTS (
+                        SELECT 1
+                        FROM approvals ap
+                        JOIN decisions approval_decision
+                          ON approval_decision.id = ap.decision_id
+                          AND approval_decision.transaction_id = t.id
+                          AND approval_decision.policy_id = p.id
+                          AND approval_decision.policy_version = NEW.policy_version
+                        JOIN transactions approval_transaction
+                          ON approval_transaction.id = approval_decision.transaction_id
+                          AND approval_transaction.agent_id = t.agent_id
+                        WHERE ap.id = NEW.approval_id
+                          AND ap.decision_id = d.id
+                          AND ap.status = 'approved'
+                      )
+                    )
+                  )
+              ) THEN RAISE(ABORT, 'authorization intent does not match eligible records') END;
+            END;
+        `);
+        this.connection.pragma("user_version = 3");
+      });
+      migration.immediate();
+    }
   }
 
   listAgents(): AgentRecord[] {
@@ -277,6 +834,42 @@ export class SentraDatabase {
       | Record<string, unknown>
       | undefined;
     return decodeAgent(row);
+  }
+
+  setAgentAuthorizedNearAccount(
+    id: string,
+    accountId: string | null,
+    options?: { expectedCurrentAccountId: string | null },
+  ): AgentRecord | undefined {
+    if (accountId !== null && !isValidNearAccountId(accountId)) {
+      throw new Error("Authorized NEAR account ID is invalid.");
+    }
+
+    const update = this.connection.transaction(() => {
+      const current = this.getAgent(id);
+      if (!current) return undefined;
+      if (
+        options &&
+        current.authorizedNearAccountId !== options.expectedCurrentAccountId
+      ) {
+        throw new Error("NEAR wallet binding changed; review the current binding and retry.");
+      }
+      if (current.authorizedNearAccountId === accountId) return current;
+
+      const updatedAt = now();
+      this.connection
+        .prepare("UPDATE agents SET authorized_near_account_id = ?, updated_at = ? WHERE id = ?")
+        .run(accountId, updatedAt, id);
+      this.insertAudit(
+        "agent.near_account_binding_changed",
+        "agent",
+        id,
+        { authorizedNearAccountId: accountId },
+        updatedAt,
+      );
+      return this.getAgent(id);
+    });
+    return update.immediate();
   }
 
   createAgent(name: string, description: string): { agent: AgentRecord; policy: PolicyRecord } {
@@ -327,7 +920,7 @@ export class SentraDatabase {
       }
       return this.getAgent(id);
     });
-    return update();
+    return update.immediate();
   }
 
   getCurrentPolicy(agentId: string): PolicyRecord | undefined {
@@ -358,7 +951,7 @@ export class SentraDatabase {
       );
       return this.getCurrentPolicy(agentId);
     });
-    return update();
+    return update.immediate();
   }
 
   createEvaluation(input: EvaluationInput): EvaluationRecord {
@@ -446,6 +1039,423 @@ export class SentraDatabase {
       decisionId,
       approval: approvalId ? this.getApproval(approvalId) ?? null : null,
     };
+  }
+
+  createAuthorizationIntent(
+    input: NewAuthorizationIntent,
+  ): AuthorizationIntentRecord {
+    if (!/^[0-9a-f]{64}$/.test(input.tokenHash)) {
+      throw new Error("Authorization token hash must be a SHA-256 hex digest.");
+    }
+    if (!isValidNearAccountId(input.authorizedWalletAccountId)) {
+      throw new Error("Authorized NEAR account ID is invalid.");
+    }
+    const expiresAt = Date.parse(input.expiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      throw new Error("Authorization intent expiry must be a valid future timestamp.");
+    }
+
+    const id = randomUUID();
+    const createdAt = now();
+    const persist = this.connection.transaction(() => {
+      if (!this.isAuthorizationIntentInputEligible(input)) {
+        throw new Error("Authorization intent does not match current eligible records.");
+      }
+      this.connection
+        .prepare(
+          `INSERT INTO authorization_intents
+            (id, transaction_id, decision_id, approval_id, token_hash, policy_id,
+             policy_version, authorized_wallet_account_id, expires_at, created_at, state)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued')`,
+        )
+        .run(
+          id,
+          input.transactionId,
+          input.decisionId,
+          input.approvalId,
+          input.tokenHash,
+          input.policyId,
+          input.policyVersion,
+          input.authorizedWalletAccountId,
+          input.expiresAt,
+          createdAt,
+        );
+      this.insertAudit(
+        "authorization_intent.issued",
+        "authorization_intent",
+        id,
+        {
+          transactionId: input.transactionId,
+          decisionId: input.decisionId,
+          approvalId: input.approvalId,
+          policyId: input.policyId,
+          policyVersion: input.policyVersion,
+          authorizedWalletAccountId: input.authorizedWalletAccountId,
+          expiresAt: input.expiresAt,
+        },
+        createdAt,
+      );
+    });
+    persist.immediate();
+    return this.getAuthorizationIntent(id)!;
+  }
+
+  private isAuthorizationIntentInputEligible(input: NewAuthorizationIntent): boolean {
+    const row = this.connection
+      .prepare(
+        `SELECT EXISTS (
+          SELECT 1
+          FROM transactions t
+          JOIN decisions d
+            ON d.id = ?
+            AND d.transaction_id = t.id
+            AND d.policy_id = ?
+            AND d.policy_version = ?
+          JOIN policies p
+            ON p.id = ?
+            AND p.agent_id = t.agent_id
+            AND CAST(p.version AS TEXT) = ?
+            AND p.version = (
+              SELECT MAX(current_policy.version)
+              FROM policies current_policy
+              WHERE current_policy.agent_id = p.agent_id
+            )
+          JOIN agents a
+            ON a.id = t.agent_id
+            AND a.enabled = 1
+            AND a.authorized_near_account_id = ?
+          WHERE t.id = ?
+            AND t.status = d.decision
+            AND d.decision IN ('ALLOW', 'WARN')
+            AND (
+              (d.decision = 'ALLOW' AND ? IS NULL)
+              OR (
+                d.decision = 'WARN'
+                AND EXISTS (
+                  SELECT 1
+                  FROM approvals ap
+                  JOIN decisions approval_decision
+                    ON approval_decision.id = ap.decision_id
+                    AND approval_decision.transaction_id = t.id
+                    AND approval_decision.policy_id = p.id
+                    AND approval_decision.policy_version = ?
+                  JOIN transactions approval_transaction
+                    ON approval_transaction.id = approval_decision.transaction_id
+                    AND approval_transaction.agent_id = t.agent_id
+                  WHERE ap.id = ?
+                    AND ap.decision_id = d.id
+                    AND ap.status = 'approved'
+                )
+              )
+            )
+        ) AS eligible`,
+      )
+      .get(
+        input.decisionId,
+        input.policyId,
+        input.policyVersion,
+        input.policyId,
+        input.policyVersion,
+        input.authorizedWalletAccountId,
+        input.transactionId,
+        input.approvalId,
+        input.policyVersion,
+        input.approvalId,
+      ) as { eligible: number };
+    return row.eligible === 1;
+  }
+
+  getAuthorizationIntent(id: string): AuthorizationIntentRecord | undefined {
+    const row = this.connection
+      .prepare("SELECT * FROM authorization_intents WHERE id = ?")
+      .get(id) as Record<string, unknown> | undefined;
+    return decodeAuthorizationIntent(row);
+  }
+
+  getAuthorizationIntentByTokenHash(
+    transactionId: string,
+    tokenHash: string,
+  ): AuthorizationIntentRecord | undefined {
+    const row = this.connection
+      .prepare(
+        "SELECT * FROM authorization_intents WHERE transaction_id = ? AND token_hash = ?",
+      )
+      .get(transactionId, tokenHash) as Record<string, unknown> | undefined;
+    return decodeAuthorizationIntent(row);
+  }
+
+  private isAuthorizationIntentCurrentlyEligible(
+    intent: AuthorizationIntentRecord,
+    requireUnexpired: boolean,
+  ): boolean {
+    if (requireUnexpired && Date.parse(intent.expiresAt) <= Date.now()) return false;
+    const row = this.connection
+      .prepare(
+        `SELECT EXISTS (
+          SELECT 1
+          FROM transactions t
+          JOIN decisions d ON d.id = ? AND d.transaction_id = t.id
+          JOIN policies p ON p.id = ?
+            AND p.agent_id = t.agent_id
+            AND CAST(p.version AS TEXT) = ?
+          JOIN agents a ON a.id = t.agent_id
+            AND a.enabled = 1
+            AND a.authorized_near_account_id = ?
+          WHERE t.id = ?
+            AND d.policy_id = p.id
+            AND d.policy_version = ?
+            AND d.decision IN ('ALLOW', 'WARN')
+            AND p.version = (
+              SELECT MAX(current_policy.version)
+              FROM policies current_policy
+              WHERE current_policy.agent_id = p.agent_id
+            )
+            AND (
+              (d.decision = 'ALLOW' AND ? IS NULL)
+              OR (
+                d.decision = 'WARN'
+                AND EXISTS (
+                  SELECT 1 FROM approvals ap
+                  WHERE ap.id = ?
+                    AND ap.decision_id = d.id
+                    AND ap.status = 'approved'
+                )
+              )
+            )
+        ) AS eligible`,
+      )
+      .get(
+        intent.decisionId,
+        intent.policyId,
+        intent.policyVersion,
+        intent.authorizedWalletAccountId,
+        intent.transactionId,
+        intent.policyVersion,
+        intent.approvalId,
+        intent.approvalId,
+      ) as { eligible: number };
+    return row.eligible === 1;
+  }
+
+  private setAuthorizationIntentState(
+    id: string,
+    state: "expired" | "stale",
+    reason: string,
+    timestamp: string,
+  ): AuthorizationIntentRecord | undefined {
+    const update = this.connection
+      .prepare(
+        `UPDATE authorization_intents
+         SET state = ?, consumed_at = ?
+         WHERE id = ? AND state IN ('issued', 'indeterminate')`,
+      )
+      .run(state, timestamp, id);
+    if (update.changes !== 1) return this.getAuthorizationIntent(id);
+    this.insertAudit(
+      `authorization_intent.${state}`,
+      "authorization_intent",
+      id,
+      { reason },
+      timestamp,
+    );
+    return this.getAuthorizationIntent(id);
+  }
+
+  startAuthorizationIntentVerification(
+    id: string,
+    transactionHash: string,
+    claimedSignerAccountId: string,
+  ): AuthorizationIntentRecord | undefined {
+    if (
+      !NEAR_TRANSACTION_HASH_PATTERN.test(transactionHash) ||
+      !isValidNearAccountId(claimedSignerAccountId)
+    ) {
+      return undefined;
+    }
+    const start = this.connection.transaction(() => {
+      const intent = this.getAuthorizationIntent(id);
+      if (!intent || intent.authorizedWalletAccountId !== claimedSignerAccountId) {
+        return undefined;
+      }
+      if (Date.parse(intent.expiresAt) <= Date.now()) {
+        this.setAuthorizationIntentState(id, "expired", "Intent expired before verification.", now());
+        return undefined;
+      }
+      if (!this.isAuthorizationIntentCurrentlyEligible(intent, true)) {
+        this.setAuthorizationIntentState(
+          id,
+          "stale",
+          "Agent, wallet binding, policy, or approval changed before verification.",
+          now(),
+        );
+        return undefined;
+      }
+      const isRetry =
+        intent.state === "indeterminate" &&
+        intent.transactionHash === transactionHash &&
+        intent.claimedSignerAccountId === claimedSignerAccountId;
+      if (
+        (intent.state !== "issued" && !isRetry)
+      ) {
+        return undefined;
+      }
+      const updated = this.connection
+        .prepare(
+          `UPDATE authorization_intents
+           SET state = 'verifying', transaction_hash = ?, claimed_signer_account_id = ?
+           WHERE id = ? AND state = ?`,
+        )
+        .run(transactionHash, claimedSignerAccountId, id, intent.state);
+      if (updated.changes !== 1) return undefined;
+      const createdAt = now();
+      this.insertAudit(
+        "authorization_intent.verification_started",
+        "authorization_intent",
+        id,
+        { transactionHash, claimedSignerAccountId },
+        createdAt,
+      );
+      return this.getAuthorizationIntent(id);
+    });
+    return start.immediate();
+  }
+
+  invalidateAuthorizationIntent(
+    id: string,
+    state: "expired" | "stale",
+    reason: string,
+  ): AuthorizationIntentRecord | undefined {
+    const invalidate = this.connection.transaction(() => {
+      const updatedAt = now();
+      return this.setAuthorizationIntentState(id, state, reason, updatedAt);
+    });
+    return invalidate.immediate();
+  }
+
+  completeAuthorizationIntentVerification(
+    verification: NewChainVerification,
+  ): CompletedChainVerification {
+    let intentState: AuthorizationIntentState =
+      verification.status === "verified"
+        ? "verified"
+        : verification.status === "failed"
+          ? "failed"
+          : "indeterminate";
+    const createdAt = now();
+    const consumedAt = intentState === "indeterminate" ? null : verification.verifiedAt;
+
+    const complete = this.connection.transaction(() => {
+      const intent = this.getAuthorizationIntent(verification.authorizationIntentId);
+      if (
+        !intent ||
+        intent.state !== "verifying" ||
+        intent.transactionHash !== verification.transactionHash
+      ) {
+        throw new Error("Authorization intent is not verifying this transaction hash.");
+      }
+      if (!this.isAuthorizationIntentCurrentlyEligible(intent, false)) {
+        intentState = "stale";
+      }
+      const existing = this.connection
+        .prepare("SELECT * FROM chain_verifications WHERE transaction_hash = ?")
+        .get(verification.transactionHash) as Record<string, unknown> | undefined;
+      let verificationId: string;
+      if (existing) {
+        if (String(existing.authorization_intent_id) !== intent.id) {
+          throw new Error(
+            "Transaction hash is already associated with another authorization intent.",
+          );
+        }
+        verificationId = String(existing.id);
+        this.connection
+          .prepare(
+            `UPDATE chain_verifications
+             SET status = ?, reason = ?, observed_signer_account_id = ?,
+                 observed_receiver_account_id = ?, observed_amount_yocto = ?,
+                 verified_at = ?
+             WHERE id = ?`,
+          )
+          .run(
+            verification.status,
+            verification.reason,
+            verification.observedSignerAccountId,
+            verification.observedReceiverAccountId,
+            verification.observedAmountYocto,
+            verification.verifiedAt,
+            verificationId,
+          );
+      } else {
+        verificationId = randomUUID();
+        this.connection
+          .prepare(
+            `INSERT INTO chain_verifications
+              (id, authorization_intent_id, transaction_hash, status, reason,
+               observed_signer_account_id, observed_receiver_account_id,
+               observed_amount_yocto, created_at, verified_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            verificationId,
+            intent.id,
+            verification.transactionHash,
+            verification.status,
+            verification.reason,
+            verification.observedSignerAccountId,
+            verification.observedReceiverAccountId,
+            verification.observedAmountYocto,
+            createdAt,
+            verification.verifiedAt,
+          );
+      }
+      this.connection
+        .prepare("UPDATE authorization_intents SET state = ?, consumed_at = ? WHERE id = ?")
+        .run(
+          intentState,
+          intentState === "stale" ? verification.verifiedAt : consumedAt,
+          intent.id,
+        );
+      if (intentState === "stale") {
+        this.insertAudit(
+          "authorization_intent.stale",
+          "authorization_intent",
+          intent.id,
+          { reason: "Authorization changed during chain verification." },
+          verification.verifiedAt,
+        );
+      }
+      this.insertAudit(
+        "chain_verification.completed",
+        "authorization_intent",
+        intent.id,
+        {
+          transactionHash: verification.transactionHash,
+          status: verification.status,
+          reason: verification.reason,
+          intentState,
+          observedSignerAccountId: verification.observedSignerAccountId,
+          observedReceiverAccountId: verification.observedReceiverAccountId,
+          observedAmountYocto: verification.observedAmountYocto,
+        },
+        verification.verifiedAt,
+      );
+      const row = this.connection
+        .prepare("SELECT * FROM chain_verifications WHERE id = ?")
+        .get(verificationId) as Record<string, unknown>;
+      return {
+        ...decodeChainVerification(row)!,
+        authorizationIntentState: intentState,
+      };
+    });
+    return complete.immediate();
+  }
+
+  getChainVerification(intentId: string): ChainVerificationRecord | undefined {
+    const row = this.connection
+      .prepare(
+        "SELECT * FROM chain_verifications WHERE authorization_intent_id = ? ORDER BY created_at DESC LIMIT 1",
+      )
+      .get(intentId) as Record<string, unknown> | undefined;
+    return decodeChainVerification(row);
   }
 
   listTransactions(): TransactionRecord[] {

@@ -539,3 +539,20 @@ test("malformed requests return client errors without internal details", async (
     assert.equal(JSON.stringify(missing.json).includes("stack"), false);
   });
 });
+
+test("wallet bindings have no public HTTP provisioning endpoint", async () => {
+  await withFixture(async (fixture) => {
+    const agentId = await registerAgent(fixture);
+    const response = await fixture.request(
+      `/api/agents/${agentId}/wallet-binding`,
+      "PUT",
+      { accountId: "authorized.testnet" },
+    );
+
+    assert.equal(response.status, 404);
+    assert.equal(
+      fixture.database.getAgent(agentId)?.authorizedNearAccountId,
+      null,
+    );
+  });
+});
