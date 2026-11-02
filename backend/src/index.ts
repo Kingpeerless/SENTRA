@@ -1,14 +1,9 @@
-import express from "express";
+import { createApp } from "./api/app.js";
+import { SentraDatabase } from "./database/database.js";
 
-const app = express();
 const port = Number(process.env.PORT ?? 3001);
-
-app.get("/api/health", (_request, response) => {
-  response.json({
-    status: "ok",
-    message: "SENTRA backend is running",
-  });
-});
+const database = new SentraDatabase();
+const app = createApp(database);
 
 app.listen(port, () => {
   console.log(`SENTRA backend listening on port ${port}`);
