@@ -61,6 +61,28 @@ export interface AuditRecord {
   createdAt: string;
 }
 
+export interface ThreatSimulationRecord {
+  id: string;
+  agentId: string;
+  policyId: string;
+  scenarioId: string;
+  description: string;
+  maliciousInstruction: string;
+  simulatedResponse: string;
+  proposedTransaction: Transaction;
+  checksPerformed: string[];
+  decision: PolicyDecision["decision"];
+  explanation: string;
+  triggeredPolicyRules: string[];
+  outcome: "blocked" | "warned" | "allowed";
+  isSimulation: true;
+  executed: false;
+  policyVersion: string;
+  createdAt: string;
+}
+
+export type NewThreatSimulation = Omit<ThreatSimulationRecord, "id" | "createdAt">;
+
 export interface EvaluationRecord {
   transactionId: string;
   decisionId: string;
@@ -139,6 +161,26 @@ const SCHEMA = `
     created_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS threat_simulations (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+    policy_id TEXT NOT NULL REFERENCES policies(id) ON DELETE RESTRICT,
+    scenario_id TEXT NOT NULL,
+    description TEXT NOT NULL,
+    malicious_instruction TEXT NOT NULL,
+    simulated_response TEXT NOT NULL,
+    proposed_transaction TEXT NOT NULL CHECK (json_valid(proposed_transaction)),
+    checks_performed TEXT NOT NULL CHECK (json_valid(checks_performed)),
+    decision TEXT NOT NULL CHECK (decision IN ('ALLOW', 'WARN', 'BLOCK')),
+    explanation TEXT NOT NULL,
+    triggered_policy_rules TEXT NOT NULL CHECK (json_valid(triggered_policy_rules)),
+    outcome TEXT NOT NULL CHECK (outcome IN ('blocked', 'warned', 'allowed')),
+    is_simulation INTEGER NOT NULL DEFAULT 1 CHECK (is_simulation = 1),
+    executed INTEGER NOT NULL DEFAULT 0 CHECK (executed = 0),
+    policy_version TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS idx_policies_agent_version
     ON policies(agent_id, version DESC);
   CREATE INDEX IF NOT EXISTS idx_transactions_agent_created
@@ -149,6 +191,8 @@ const SCHEMA = `
     ON approvals(status, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_audit_created
     ON audit_logs(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_threat_simulations_agent_created
+    ON threat_simulations(agent_id, created_at DESC);
 
   CREATE TRIGGER IF NOT EXISTS audit_logs_no_update
     BEFORE UPDATE ON audit_logs
@@ -500,6 +544,83 @@ export class SentraDatabase {
       .prepare("SELECT * FROM audit_logs ORDER BY created_at DESC, id")
       .all() as Record<string, unknown>[];
     return rows.map(decodeAudit);
+  }
+
+  createThreatSimulation(
+    simulation: NewThreatSimulation,
+  ): ThreatSimulationRecord {
+    const id = randomUUID();
+    const createdAt = now();
+    const persist = this.connection.transaction(() => {
+      this.connection
+        .prepare(
+          `INSERT INTO threat_simulations
+            (id, agent_id, policy_id, scenario_id, description, malicious_instruction,
+             simulated_response, proposed_transaction, checks_performed, decision, explanation,
+             triggered_policy_rules, outcome, is_simulation, executed, policy_version, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
+        )
+        .run(
+          id,
+          simulation.agentId,
+          simulation.policyId,
+          simulation.scenarioId,
+          simulation.description,
+          simulation.maliciousInstruction,
+          simulation.simulatedResponse,
+          JSON.stringify(simulation.proposedTransaction),
+          JSON.stringify(simulation.checksPerformed),
+          simulation.decision,
+          simulation.explanation,
+          JSON.stringify(simulation.triggeredPolicyRules),
+          simulation.outcome,
+          simulation.policyVersion,
+          createdAt,
+        );
+      this.insertAudit(
+        "threat_lab.simulation.completed",
+        "threat_simulation",
+        id,
+        {
+          agentId: simulation.agentId,
+          scenarioId: simulation.scenarioId,
+          decision: simulation.decision,
+          outcome: simulation.outcome,
+          policyVersion: simulation.policyVersion,
+          isSimulation: true,
+          executed: false,
+        },
+        createdAt,
+      );
+    });
+    persist();
+    return this.getThreatSimulation(id)!;
+  }
+
+  getThreatSimulation(id: string): ThreatSimulationRecord | undefined {
+    const row = this.connection
+      .prepare("SELECT * FROM threat_simulations WHERE id = ?")
+      .get(id) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    return {
+      id: String(row.id),
+      agentId: String(row.agent_id),
+      policyId: String(row.policy_id),
+      scenarioId: String(row.scenario_id),
+      description: String(row.description),
+      maliciousInstruction: String(row.malicious_instruction),
+      simulatedResponse: String(row.simulated_response),
+      proposedTransaction: JSON.parse(String(row.proposed_transaction)) as Transaction,
+      checksPerformed: JSON.parse(String(row.checks_performed)) as string[],
+      decision: row.decision as PolicyDecision["decision"],
+      explanation: String(row.explanation),
+      triggeredPolicyRules: JSON.parse(String(row.triggered_policy_rules)) as string[],
+      outcome: row.outcome as ThreatSimulationRecord["outcome"],
+      isSimulation: true,
+      executed: false,
+      policyVersion: String(row.policy_version),
+      createdAt: String(row.created_at),
+    };
   }
 
   private insertPolicy(

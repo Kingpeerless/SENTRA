@@ -5,6 +5,7 @@ import express, {
 import { z } from "zod";
 import { SentraDatabase } from "../database/database.js";
 import { SentraService, ServiceError } from "../services/sentraService.js";
+import { THREAT_SCENARIOS, ThreatLabService } from "../services/threatLabService.js";
 
 const accountIdPattern = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
 const yoctoAmountSchema = z.string().refine(
@@ -78,6 +79,15 @@ const approvalRejectSchema = approvalReviewSchema.extend({
   rejectionReason: z.string().trim().min(1).max(2000),
 });
 
+const threatSimulationSchema = z
+  .object({
+    agentId: z.string().min(1),
+    scenarioId: z
+      .string()
+      .refine((id) => THREAT_SCENARIOS.some((scenario) => scenario.id === id)),
+  })
+  .strict();
+
 function sendValidationError(response: Response, error: z.ZodError): void {
   response.status(400).json({
     error: {
@@ -105,11 +115,22 @@ function sendParsed<T>(
 export function createApp(database: SentraDatabase): express.Express {
   const app = express();
   const service = new SentraService(database);
+  const threatLabService = new ThreatLabService(database);
   app.disable("x-powered-by");
   app.use(express.json({ limit: "32kb" }));
 
   app.get("/api/health", (_request, response) => {
     response.json({ status: "ok", message: "SENTRA backend is running" });
+  });
+
+  app.get("/api/threat-lab/scenarios", (_request, response) => {
+    response.json({ data: threatLabService.listScenarios() });
+  });
+
+  app.post("/api/threat-lab/simulate", (request, response) => {
+    const body = sendParsed(response, threatSimulationSchema.safeParse(request.body));
+    if (!body) return;
+    response.status(201).json({ data: threatLabService.simulate(body.agentId, body.scenarioId) });
   });
 
   app.get("/api/agents", (_request, response) => {

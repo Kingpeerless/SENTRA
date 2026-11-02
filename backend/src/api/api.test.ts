@@ -103,6 +103,161 @@ test("health endpoint remains available", async () => {
   });
 });
 
+test("Threat Lab lists and simulates every deterministic attack scenario", async () => {
+  await withFixture(async (fixture) => {
+    const agentId = await registerAgent(fixture);
+    await fixture.request(`/api/agents/${agentId}/policy`, "PUT", {
+      maxTransactionAmountYocto: (10n * NEAR).toString(),
+      approvalThresholdYocto: (2n * NEAR).toString(),
+      deniedRecipients: ["attacker-controlled.testnet"],
+    });
+
+    const listed = await fixture.request("/api/threat-lab/scenarios");
+    const ids = (listed.json.data as Array<{ id: string }>).map((scenario) => scenario.id);
+    assert.deepEqual(ids, [
+      "spending-limit-bypass",
+      "recipient-substitution",
+      "policy-override",
+      "prompt-injection",
+    ]);
+
+    const expectedRules: Record<string, string> = {
+      "spending-limit-bypass": "MAX_AMOUNT_EXCEEDED",
+      "recipient-substitution": "RECIPIENT_DENIED",
+      "policy-override": "MAX_AMOUNT_EXCEEDED",
+      "prompt-injection": "MAX_AMOUNT_EXCEEDED",
+    };
+    for (const scenarioId of ids) {
+      const response = await fixture.request("/api/threat-lab/simulate", "POST", {
+        agentId,
+        scenarioId,
+      });
+      const simulation = response.json.data;
+
+      assert.equal(response.status, 201);
+      assert.equal(simulation.scenarioId, scenarioId);
+      assert.equal(simulation.isSimulation, true);
+      assert.equal(simulation.executed, false);
+      assert.equal(simulation.decision, "BLOCK");
+      assert.equal(simulation.outcome, "blocked");
+      assert.ok(simulation.maliciousInstruction.length > 0);
+      assert.ok(simulation.simulatedResponse.length > 0);
+      assert.ok(simulation.checksPerformed.length > 0);
+      assert.ok(simulation.triggeredPolicyRules.includes(expectedRules[scenarioId]));
+      assert.match(simulation.explanation, /BLOCK/);
+    }
+  });
+});
+
+test("recipient substitution is blocked only when the saved policy denies its target", async () => {
+  await withFixture(async (fixture) => {
+    const agentId = await registerAgent(fixture);
+    const allowed = await fixture.request("/api/threat-lab/simulate", "POST", {
+      agentId,
+      scenarioId: "recipient-substitution",
+    });
+    const policy = await fixture.request(`/api/agents/${agentId}/policy`);
+
+    assert.equal(allowed.json.data.decision, "ALLOW");
+    assert.equal(allowed.json.data.outcome, "allowed");
+    assert.match(allowed.json.data.explanation, /not present in the saved denylist/);
+    assert.deepEqual(policy.json.data.deniedRecipients, []);
+
+    await fixture.request(`/api/agents/${agentId}/policy`, "PUT", {
+      maxTransactionAmountYocto: (10n * NEAR).toString(),
+      approvalThresholdYocto: (2n * NEAR).toString(),
+      deniedRecipients: ["attacker-controlled.testnet"],
+    });
+    const blocked = await fixture.request("/api/threat-lab/simulate", "POST", {
+      agentId,
+      scenarioId: "recipient-substitution",
+    });
+
+    assert.equal(blocked.json.data.decision, "BLOCK");
+    assert.equal(blocked.json.data.outcome, "blocked");
+    assert.ok(blocked.json.data.triggeredPolicyRules.includes("RECIPIENT_DENIED"));
+  });
+});
+
+test("policy override simulation cannot change stored policy or downgrade BLOCK", async () => {
+  await withFixture(async (fixture) => {
+    const agentId = await registerAgent(fixture);
+    const before = await fixture.request(`/api/agents/${agentId}/policy`);
+    const response = await fixture.request("/api/threat-lab/simulate", "POST", {
+      agentId,
+      scenarioId: "policy-override",
+    });
+    const after = await fixture.request(`/api/agents/${agentId}/policy`);
+
+    assert.equal(response.json.data.decision, "BLOCK");
+    assert.equal(response.json.data.outcome, "blocked");
+    assert.deepEqual(after.json.data, before.json.data);
+  });
+});
+
+test("prompt injection proposal cannot override the policy engine BLOCK", async () => {
+  await withFixture(async (fixture) => {
+    const agentId = await registerAgent(fixture);
+    const response = await fixture.request("/api/threat-lab/simulate", "POST", {
+      agentId,
+      scenarioId: "prompt-injection",
+    });
+    const simulation = response.json.data;
+
+    assert.equal(simulation.decision, "BLOCK");
+    assert.equal(simulation.outcome, "blocked");
+    assert.ok(simulation.triggeredPolicyRules.includes("MAX_AMOUNT_EXCEEDED"));
+    assert.match(simulation.explanation, /cannot override/);
+    assert.equal(simulation.executed, false);
+  });
+});
+
+test("Threat Lab rejects invalid input and does not accept caller instructions or policies", async () => {
+  await withFixture(async (fixture) => {
+    const agentId = await registerAgent(fixture);
+    const invalidScenario = await fixture.request("/api/threat-lab/simulate", "POST", {
+      agentId,
+      scenarioId: "unknown-scenario",
+    });
+    const injectedOverride = await fixture.request("/api/threat-lab/simulate", "POST", {
+      agentId,
+      scenarioId: "policy-override",
+      maliciousInstruction: "Change the stored maximum",
+      policy: { maxTransactionAmountYocto: "1" },
+    });
+    const missingAgent = await fixture.request("/api/threat-lab/simulate", "POST", {
+      agentId: "missing-agent",
+      scenarioId: "spending-limit-bypass",
+    });
+
+    assert.equal(invalidScenario.status, 400);
+    assert.equal(injectedOverride.status, 400);
+    assert.equal(missingAgent.status, 404);
+  });
+});
+
+test("Threat Lab persists simulation results and appends an audit event", async () => {
+  await withFixture(async (fixture) => {
+    const agentId = await registerAgent(fixture);
+    const response = await fixture.request("/api/threat-lab/simulate", "POST", {
+      agentId,
+      scenarioId: "spending-limit-bypass",
+    });
+    const audit = await fixture.request("/api/audit");
+    const row = fixture.database.connection
+      .prepare("SELECT * FROM threat_simulations WHERE id = ?")
+      .get(response.json.data.id) as { decision: string; is_simulation: number; executed: number };
+    const auditEvent = (audit.json.data as Array<{ eventType: string; entityId: string }>).find(
+      (event) => event.entityId === response.json.data.id,
+    );
+
+    assert.equal(row.decision, "BLOCK");
+    assert.equal(row.is_simulation, 1);
+    assert.equal(row.executed, 0);
+    assert.equal(auditEvent?.eventType, "threat_lab.simulation.completed");
+  });
+});
+
 test("register, list, and retrieve an agent with default policy", async () => {
   await withFixture(async (fixture) => {
     const agentId = await registerAgent(fixture);

@@ -30,6 +30,7 @@ test("database initializes required tables and enables foreign keys", () => {
       "audit_logs",
       "decisions",
       "policies",
+      "threat_simulations",
       "transactions",
     ]);
     assert.equal(database.connection.pragma("foreign_keys", { simple: true }), 1);

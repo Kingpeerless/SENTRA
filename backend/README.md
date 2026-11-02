@@ -16,6 +16,10 @@ Routes use `{ "data": ... }` for successful API responses and `{ "error": { "cod
 - `POST /api/approvals/:approvalId/approve`
 - `POST /api/approvals/:approvalId/reject`
 - `GET /api/audit`
+- `GET /api/threat-lab/scenarios`
+- `POST /api/threat-lab/simulate`
+
+Threat Lab uses deterministic, synthetic attack scenarios; it does not call an LLM or execute a transaction. Results are stored separately from transaction records and include the policy version used. Recipient substitution is blocked only if the substituted recipient is present in that agent's saved denylist; an ALLOW result demonstrates this policy configuration gap.
 
 Transaction evaluation accepts an `agentId` and a `transaction` proposal. The proposal does not supply a policy; evaluation always uses the registered agent's saved policy.
 
