@@ -26,6 +26,7 @@ export const AUTHORIZATION_INTENT_STATES = [
   "indeterminate",
   "expired",
   "stale",
+  "revoked",
 ] as const;
 export type AuthorizationIntentState = (typeof AUTHORIZATION_INTENT_STATES)[number];
 
@@ -275,7 +276,7 @@ const SCHEMA = `
     END;
 `;
 
-const LATEST_SCHEMA_VERSION = 3;
+const LATEST_SCHEMA_VERSION = 4;
 const NEAR_ACCOUNT_ID_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
 const NEAR_TRANSACTION_HASH_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
 
@@ -285,6 +286,10 @@ function now(): string {
 
 export function isValidNearAccountId(value: string): boolean {
   return value.length >= 2 && value.length <= 64 && NEAR_ACCOUNT_ID_PATTERN.test(value);
+}
+
+export function isValidNearTransactionHash(value: string): boolean {
+  return NEAR_TRANSACTION_HASH_PATTERN.test(value);
 }
 
 function decodeAuthorizationIntent(
@@ -524,7 +529,10 @@ export class SentraDatabase {
             WHEN NOT (
               (OLD.state = 'issued' AND NEW.state IN ('verifying', 'expired', 'stale'))
               OR (OLD.state = 'indeterminate' AND NEW.state IN ('verifying', 'expired', 'stale'))
-              OR (OLD.state = 'verifying' AND NEW.state IN ('verified', 'failed', 'indeterminate'))
+              OR (
+                OLD.state = 'verifying'
+                AND NEW.state IN ('verified', 'failed', 'indeterminate', 'stale')
+              )
             )
             BEGIN
               SELECT RAISE(ABORT, 'invalid authorization intent state transition');
@@ -761,7 +769,7 @@ export class SentraDatabase {
     if (version < 3) {
       const migration = this.connection.transaction(() => {
         this.connection.exec(`
-          DROP TRIGGER authorization_intents_validate_insert;
+          DROP TRIGGER IF EXISTS authorization_intents_validate_insert;
           CREATE TRIGGER authorization_intents_validate_insert
             BEFORE INSERT ON authorization_intents
             BEGIN
@@ -817,6 +825,119 @@ export class SentraDatabase {
             END;
         `);
         this.connection.pragma("user_version = 3");
+      });
+      migration.immediate();
+    }
+
+    if (version < 4) {
+      const migration = this.connection.transaction(() => {
+        this.connection.exec(`
+          CREATE TABLE authorization_intent_revocations (
+            intent_id TEXT PRIMARY KEY
+              REFERENCES authorization_intents(id) ON DELETE RESTRICT,
+            revoked_at TEXT NOT NULL
+          );
+
+          CREATE TRIGGER authorization_intent_revocations_validate_insert
+            BEFORE INSERT ON authorization_intent_revocations
+            WHEN NOT EXISTS (
+              SELECT 1
+              FROM authorization_intents i
+              JOIN transactions t ON t.id = i.transaction_id
+              JOIN decisions d
+                ON d.id = i.decision_id
+                AND d.transaction_id = t.id
+                AND d.policy_id = i.policy_id
+                AND d.policy_version = i.policy_version
+                AND t.status = d.decision
+                AND d.decision IN ('ALLOW', 'WARN')
+              JOIN policies p
+                ON p.id = i.policy_id
+                AND p.agent_id = t.agent_id
+                AND CAST(p.version AS TEXT) = i.policy_version
+                AND p.version = (
+                  SELECT MAX(current_policy.version)
+                  FROM policies current_policy
+                  WHERE current_policy.agent_id = p.agent_id
+                )
+              JOIN agents a
+                ON a.id = t.agent_id
+                AND a.enabled = 1
+                AND a.authorized_near_account_id = i.authorized_wallet_account_id
+              WHERE i.id = NEW.intent_id
+                AND i.state = 'issued'
+                AND i.expires_at > NEW.revoked_at
+                AND (
+                  (d.decision = 'ALLOW' AND i.approval_id IS NULL)
+                  OR (
+                    d.decision = 'WARN'
+                    AND EXISTS (
+                      SELECT 1
+                      FROM approvals ap
+                      WHERE ap.id = i.approval_id
+                        AND ap.decision_id = d.id
+                        AND ap.status = 'approved'
+                    )
+                  )
+                )
+            )
+            BEGIN
+              SELECT RAISE(ABORT, 'authorization intent is not eligible for revocation');
+            END;
+
+          CREATE TRIGGER authorization_intent_revocations_protect_update
+            BEFORE UPDATE ON authorization_intent_revocations
+            BEGIN
+              SELECT RAISE(ABORT, 'authorization revocations are immutable');
+            END;
+
+          CREATE TRIGGER authorization_intent_revocations_protect_delete
+            BEFORE DELETE ON authorization_intent_revocations
+            BEGIN
+              SELECT RAISE(ABORT, 'authorization revocations are immutable');
+            END;
+
+          CREATE TRIGGER authorization_intent_revocations_audit
+            AFTER INSERT ON authorization_intent_revocations
+            BEGIN
+              INSERT INTO audit_logs (id, event_type, entity_type, entity_id, details, created_at)
+              VALUES (
+                lower(hex(randomblob(16))),
+                'authorization_intent.revoked',
+                'authorization_intent',
+                NEW.intent_id,
+                json_object('revokedAt', NEW.revoked_at),
+                NEW.revoked_at
+              );
+            END;
+
+          DROP TRIGGER IF EXISTS authorization_intents_validate_transition;
+          CREATE TRIGGER authorization_intents_validate_transition
+            BEFORE UPDATE OF state ON authorization_intents
+            WHEN NOT (
+              (
+                OLD.state = 'issued'
+                AND NEW.state IN ('verifying', 'expired', 'stale')
+                AND NOT (
+                  NEW.state = 'verifying'
+                  AND EXISTS (
+                    SELECT 1
+                    FROM authorization_intent_revocations r
+                    WHERE r.intent_id = OLD.id
+                  )
+                )
+              )
+              OR (OLD.state = 'indeterminate' AND NEW.state IN ('verifying', 'expired', 'stale'))
+              OR (
+                OLD.state = 'verifying'
+                AND NEW.state IN ('verified', 'failed', 'indeterminate', 'stale')
+              )
+            )
+            BEGIN
+              SELECT RAISE(ABORT, 'invalid authorization intent state transition');
+            END;
+        `);
+        this.connection.pragma("user_version = 4");
       });
       migration.immediate();
     }
@@ -1169,7 +1290,12 @@ export class SentraDatabase {
     const row = this.connection
       .prepare("SELECT * FROM authorization_intents WHERE id = ?")
       .get(id) as Record<string, unknown> | undefined;
-    return decodeAuthorizationIntent(row);
+    const intent = decodeAuthorizationIntent(row);
+    if (!intent) return undefined;
+    const revocation = this.connection
+      .prepare("SELECT 1 FROM authorization_intent_revocations WHERE intent_id = ?")
+      .get(id);
+    return revocation ? { ...intent, state: "revoked" } : intent;
   }
 
   getAuthorizationIntentByTokenHash(
@@ -1261,13 +1387,72 @@ export class SentraDatabase {
     return this.getAuthorizationIntent(id);
   }
 
+  revokeAuthorizationIntent(
+    id: string,
+    tokenHash: string,
+  ): {
+    status: "revoked" | "expired" | "stale" | "not-revocable";
+    intent?: AuthorizationIntentRecord;
+    revokedAt?: string;
+  } {
+    const revoke = this.connection.transaction(() => {
+      const intent = this.getAuthorizationIntent(id);
+      if (!intent || intent.state !== "issued") {
+        return { status: "not-revocable" as const };
+      }
+      if (!/^[0-9a-f]{64}$/.test(tokenHash) || tokenHash !== intent.tokenHash) {
+        return { status: "not-revocable" as const };
+      }
+      if (Date.parse(intent.expiresAt) <= Date.now()) {
+        const expired = this.setAuthorizationIntentState(
+          id,
+          "expired",
+          "Intent expired before revocation.",
+          now(),
+        );
+        return { status: "expired" as const, ...(expired ? { intent: expired } : {}) };
+      }
+      if (!this.isAuthorizationIntentCurrentlyEligible(intent, true)) {
+        const stale = this.setAuthorizationIntentState(
+          id,
+          "stale",
+          "Agent, wallet binding, policy, or approval changed before revocation.",
+          now(),
+        );
+        return { status: "stale" as const, ...(stale ? { intent: stale } : {}) };
+      }
+
+      const revokedAt = now();
+      const inserted = this.connection
+        .prepare(
+          `INSERT INTO authorization_intent_revocations (intent_id, revoked_at)
+           SELECT ?, ?
+           WHERE EXISTS (
+             SELECT 1
+             FROM authorization_intents i
+             WHERE i.id = ?
+               AND i.state = 'issued'
+               AND i.token_hash = ?
+               AND i.expires_at > ?
+           )`,
+        )
+        .run(id, revokedAt, id, tokenHash, revokedAt);
+      if (inserted.changes !== 1) return { status: "not-revocable" as const };
+      const revokedIntent = this.getAuthorizationIntent(id);
+      return revokedIntent
+        ? { status: "revoked" as const, intent: revokedIntent, revokedAt }
+        : { status: "not-revocable" as const };
+    });
+    return revoke.immediate();
+  }
+
   startAuthorizationIntentVerification(
     id: string,
     transactionHash: string,
     claimedSignerAccountId: string,
   ): AuthorizationIntentRecord | undefined {
     if (
-      !NEAR_TRANSACTION_HASH_PATTERN.test(transactionHash) ||
+      !isValidNearTransactionHash(transactionHash) ||
       !isValidNearAccountId(claimedSignerAccountId)
     ) {
       return undefined;
@@ -1277,6 +1462,7 @@ export class SentraDatabase {
       if (!intent || intent.authorizedWalletAccountId !== claimedSignerAccountId) {
         return undefined;
       }
+      if (intent.state === "revoked") return undefined;
       if (Date.parse(intent.expiresAt) <= Date.now()) {
         this.setAuthorizationIntentState(id, "expired", "Intent expired before verification.", now());
         return undefined;
@@ -1299,6 +1485,18 @@ export class SentraDatabase {
       ) {
         return undefined;
       }
+      const priorVerification = this.connection
+        .prepare("SELECT authorization_intent_id FROM chain_verifications WHERE transaction_hash = ?")
+        .get(transactionHash) as { authorization_intent_id: string } | undefined;
+      if (priorVerification && priorVerification.authorization_intent_id !== intent.id) {
+        return undefined;
+      }
+      const priorClaim = this.connection
+        .prepare(
+          "SELECT id FROM authorization_intents WHERE transaction_hash = ? AND id != ? LIMIT 1",
+        )
+        .get(transactionHash, intent.id) as { id: string } | undefined;
+      if (priorClaim) return undefined;
       const updated = this.connection
         .prepare(
           `UPDATE authorization_intents
@@ -1353,7 +1551,11 @@ export class SentraDatabase {
       ) {
         throw new Error("Authorization intent is not verifying this transaction hash.");
       }
-      if (!this.isAuthorizationIntentCurrentlyEligible(intent, false)) {
+      const expiredDuringVerification = Date.parse(intent.expiresAt) <= Date.now();
+      if (
+        expiredDuringVerification ||
+        !this.isAuthorizationIntentCurrentlyEligible(intent, false)
+      ) {
         intentState = "stale";
       }
       const existing = this.connection
@@ -1419,7 +1621,11 @@ export class SentraDatabase {
           "authorization_intent.stale",
           "authorization_intent",
           intent.id,
-          { reason: "Authorization changed during chain verification." },
+          {
+            reason: expiredDuringVerification
+              ? "Authorization intent expired during chain verification."
+              : "Authorization changed during chain verification.",
+          },
           verification.verifiedAt,
         );
       }
@@ -1455,6 +1661,15 @@ export class SentraDatabase {
         "SELECT * FROM chain_verifications WHERE authorization_intent_id = ? ORDER BY created_at DESC LIMIT 1",
       )
       .get(intentId) as Record<string, unknown> | undefined;
+    return decodeChainVerification(row);
+  }
+
+  getChainVerificationByTransactionHash(
+    transactionHash: string,
+  ): ChainVerificationRecord | undefined {
+    const row = this.connection
+      .prepare("SELECT * FROM chain_verifications WHERE transaction_hash = ?")
+      .get(transactionHash) as Record<string, unknown> | undefined;
     return decodeChainVerification(row);
   }
 

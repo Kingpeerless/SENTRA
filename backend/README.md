@@ -11,6 +11,9 @@ Routes use `{ "data": ... }` for successful API responses and `{ "error": { "cod
 - `GET|PATCH /api/agents/:agentId`
 - `GET|PUT /api/agents/:agentId/policy`
 - `POST /api/transactions/evaluate`
+- `POST /api/transactions/:transactionId/prepare`
+- `POST /api/authorization-intents/:intentId/revoke`
+- `POST /api/transactions/confirm`
 - `GET /api/transactions` and `GET /api/transactions/:transactionId`
 - `GET /api/approvals` and `GET /api/approvals/:approvalId`
 - `POST /api/approvals/:approvalId/approve`
@@ -40,6 +43,14 @@ Transaction evaluation accepts an `agentId` and a `transaction` proposal. The pr
 The approval reviewer field is only a local hackathon demonstration value. This API has no production authentication or authorization, and a submitted reviewer name does not establish a real person's identity.
 
 Approving a pending WARN records a local review decision only. It does not sign, broadcast, or execute a blockchain transaction. SENTRA's local demo also does not prevent users from bypassing this application and transferring directly through their own wallets.
+
+Preparation accepts no transaction overrides; it rechecks the saved decision and returns a one-time token for an eligible ALLOW or approved WARN intent. Confirmation accepts only the intent ID, token, and submitted transaction hash. The backend derives the expected signer, recipient, and amount from saved records, verifies against NEAR Testnet, and records the result. A verified result means the finalized chain transaction matched the expected native transfer; ALLOW or preparation alone does not mean a transaction was signed, broadcast, or executed. RPC pending, unavailable, or indeterminate results are not success.
+
+Revocation requires the original one-time token in the request body; an intent ID alone cannot revoke it. An issued intent is revoked atomically, is recorded in the append-only audit log, and cannot proceed to verification. Revocation is not available once verification has started or after expiry. The frontend clears its in-memory token immediately and makes one best-effort revocation request when wallet/account/agent identity changes or an intent is replaced; if the request cannot be confirmed, the intent may remain valid until expiry.
+
+The wallet connector does not provide trustworthy active-network identity. SENTRA therefore displays the wallet network as **UNVERIFIED** even when the connector requests Testnet or the account exists on Testnet. No wallet-signing operation is implemented or should be enabled while active network identity cannot be independently verified.
+
+The development server binds only to `127.0.0.1`. These APIs have no user authentication and must not be exposed through a public interface, reverse proxy, or network bind. This local-only restriction is not a substitute for production authentication, authorization, CSRF defenses, or deployment security.
 
 ## Provision an agent's NEAR testnet wallet binding
 

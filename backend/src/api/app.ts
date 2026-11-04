@@ -5,6 +5,11 @@ import express, {
 import { z } from "zod";
 import { SentraDatabase } from "../database/database.js";
 import { SentraService, ServiceError } from "../services/sentraService.js";
+import {
+  TransactionAuthorizationError,
+  TransactionAuthorizationService,
+  type TransactionVerifier,
+} from "../services/transactionAuthorizationService.js";
 import { THREAT_SCENARIOS, ThreatLabService } from "../services/threatLabService.js";
 
 const accountIdPattern = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
@@ -68,6 +73,20 @@ const evaluationSchema = z
   })
   .strict();
 
+const prepareTransactionSchema = z.object({}).strict();
+const confirmTransactionSchema = z
+  .object({
+    intentId: z.string().trim().min(1).max(100),
+    authorizationToken: z.string().min(1).max(128),
+    transactionHash: z.string().min(1).max(64),
+  })
+  .strict();
+const revokeAuthorizationSchema = z
+  .object({
+    authorizationToken: z.string().min(1).max(128),
+  })
+  .strict();
+
 const approvalReviewSchema = z
   .object({
     reviewer: z.string().trim().min(1).max(120),
@@ -112,9 +131,16 @@ function sendParsed<T>(
   return parsed.data;
 }
 
-export function createApp(database: SentraDatabase): express.Express {
+export function createApp(
+  database: SentraDatabase,
+  transactionVerifier?: TransactionVerifier,
+): express.Express {
   const app = express();
   const service = new SentraService(database);
+  const authorizationService = new TransactionAuthorizationService(
+    database,
+    transactionVerifier,
+  );
   const threatLabService = new ThreatLabService(database);
   app.disable("x-powered-by");
   app.use(express.json({ limit: "32kb" }));
@@ -167,6 +193,37 @@ export function createApp(database: SentraDatabase): express.Express {
     const body = sendParsed(response, evaluationSchema.safeParse(request.body));
     if (!body) return;
     response.status(201).json({ data: service.evaluate(body.agentId, body.transaction) });
+  });
+
+  app.post("/api/transactions/:transactionId/prepare", (request, response) => {
+    const body = sendParsed(
+      response,
+      prepareTransactionSchema.safeParse(request.body ?? {}),
+    );
+    if (!body) return;
+    response.status(201).json({
+      data: authorizationService.prepare(request.params.transactionId),
+    });
+  });
+
+  app.post("/api/authorization-intents/:intentId/revoke", (request, response) => {
+    const body = sendParsed(response, revokeAuthorizationSchema.safeParse(request.body));
+    if (!body) return;
+    response.json({
+      data: authorizationService.revoke(request.params.intentId, body.authorizationToken),
+    });
+  });
+
+  app.post("/api/transactions/confirm", async (request, response) => {
+    const body = sendParsed(response, confirmTransactionSchema.safeParse(request.body));
+    if (!body) return;
+    response.json({
+      data: await authorizationService.confirm(
+        body.intentId,
+        body.authorizationToken,
+        body.transactionHash,
+      ),
+    });
   });
 
   app.get("/api/transactions", (_request, response) => {
@@ -231,6 +288,12 @@ export function createApp(database: SentraDatabase): express.Express {
   });
 
   const errorHandler: ErrorRequestHandler = (error: unknown, _request, response, _next) => {
+    if (error instanceof TransactionAuthorizationError) {
+      response.status(error.statusCode).json({
+        error: { code: error.code, message: error.message },
+      });
+      return;
+    }
     if (error instanceof ServiceError) {
       response.status(error.statusCode).json({
         error: { code: error.code, message: error.message },

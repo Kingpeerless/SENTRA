@@ -212,7 +212,11 @@ test("aborts an actually pending RPC fetch when the configured timeout expires",
     timeoutMs: 20,
     fetchImplementation: timeoutFetch,
   });
-  const timeout = await timeoutVerifier.verify(expectation);
+  // Keep Node's event loop alive while AbortSignal.timeout fires.
+  const keepAlive = setTimeout(() => undefined, 1000);
+  const timeout = await timeoutVerifier.verify(expectation).finally(() => {
+    clearTimeout(keepAlive);
+  });
   const unavailableFetch: typeof fetch = async () => {
     throw new TypeError("fetch failed");
   };

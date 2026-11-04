@@ -1,11 +1,16 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   SentraDatabase,
   type AgentRecord,
   type AuthorizationIntentRecord,
   type PolicyRecord,
   type TransactionRecord,
+  isValidNearTransactionHash,
 } from "../database/database.js";
+import {
+  NearTestnetTransactionVerifier,
+  type NearTransactionVerification,
+} from "./nearTestnetTransactionVerifier.js";
 import {
   evaluateTransaction,
   type Policy,
@@ -39,6 +44,32 @@ export interface PreparedTransactionAuthorization {
     reviewerIdentityVerified: false;
   } | null;
   executed: false;
+}
+
+export interface TransactionConfirmationResult {
+  intentId: string;
+  transactionHash: string;
+  status: "verified" | "failed" | "unverified" | "stale" | "expired";
+  authorizationIntentState: AuthorizationIntentRecord["state"];
+  chainVerificationStatus: NearTransactionVerification["status"] | null;
+  verified: boolean;
+  reason: string;
+  observed: NearTransactionVerification["observed"];
+}
+
+export interface AuthorizationRevocationResult {
+  intentId: string;
+  status: "revoked";
+  revokedAt: string;
+}
+
+export interface TransactionVerifier {
+  verify(expectation: {
+    transactionHash: string;
+    signerAccountId: string;
+    receiverAccountId: string;
+    amountYocto: string;
+  }): Promise<NearTransactionVerification>;
 }
 
 function policyFromRecord(policy: PolicyRecord): Policy {
@@ -91,7 +122,10 @@ function conflict(code: string, message: string): never {
 }
 
 export class TransactionAuthorizationService {
-  constructor(private readonly database: SentraDatabase) {}
+  constructor(
+    private readonly database: SentraDatabase,
+    private readonly verifier: TransactionVerifier = new NearTestnetTransactionVerifier(),
+  ) {}
 
   prepare(transactionId: string): PreparedTransactionAuthorization {
     if (typeof transactionId !== "string" || transactionId.trim().length === 0) {
@@ -182,6 +216,313 @@ export class TransactionAuthorizationService {
     });
 
     return prepareInTransaction.immediate();
+  }
+
+  async confirm(
+    intentId: string,
+    authorizationToken: string,
+    transactionHash: string,
+  ): Promise<TransactionConfirmationResult> {
+    if (
+      typeof intentId !== "string" ||
+      intentId.trim().length === 0 ||
+      typeof authorizationToken !== "string" ||
+      typeof transactionHash !== "string" ||
+      !isValidNearTransactionHash(transactionHash)
+    ) {
+      throw new TransactionAuthorizationError(
+        400,
+        "INVALID_INPUT",
+        "A valid authorization intent ID, token, and NEAR transaction hash are required.",
+      );
+    }
+
+    const intent = this.database.getAuthorizationIntent(intentId);
+    if (!intent) {
+      throw new TransactionAuthorizationError(404, "NOT_FOUND", "Authorization intent not found.");
+    }
+    if (!this.matchesAuthorizationToken(intent, authorizationToken)) {
+      throw new TransactionAuthorizationError(
+        401,
+        "INVALID_AUTHORIZATION_TOKEN",
+        "Authorization token is invalid.",
+      );
+    }
+    if (intent.state === "revoked") {
+      conflict("AUTHORIZATION_REVOKED", "Authorization intent has been revoked.");
+    }
+    if (intent.state === "stale") {
+      return this.staleResult(intent, transactionHash, "Authorization is no longer eligible.");
+    }
+    if (intent.state === "expired") {
+      return {
+        intentId: intent.id,
+        transactionHash,
+        status: "expired",
+        authorizationIntentState: "expired",
+        chainVerificationStatus: null,
+        verified: false,
+        reason: "Authorization intent expired before verification began.",
+        observed: null,
+      };
+    }
+    if (intent.state !== "issued" && intent.state !== "indeterminate") {
+      conflict(
+        "AUTHORIZATION_REPLAY",
+        "Authorization intent has already been used or is being verified.",
+      );
+    }
+
+    const transaction = this.database.getTransaction(intent.transactionId);
+    if (!transaction) {
+      return this.invalidateAsStale(intent, transactionHash, "Saved transaction is unavailable.");
+    }
+    if (
+      transaction.network !== "near-testnet" ||
+      transaction.transactionType !== "native_transfer" ||
+      transaction.asset !== "NEAR" ||
+      transaction.status !== transaction.decision.decision ||
+      !["ALLOW", "WARN"].includes(transaction.decision.decision)
+    ) {
+      return this.invalidateAsStale(
+        intent,
+        transactionHash,
+        "Saved transaction no longer matches an eligible native NEAR transfer.",
+      );
+    }
+
+    const started = this.database.startAuthorizationIntentVerification(
+      intent.id,
+      transactionHash,
+      intent.authorizedWalletAccountId,
+    );
+    if (!started) {
+      const current = this.database.getAuthorizationIntent(intent.id);
+      if (current?.state === "revoked") {
+        conflict("AUTHORIZATION_REVOKED", "Authorization intent has been revoked.");
+      }
+      if (current?.state === "stale") {
+        return this.staleResult(current, transactionHash, "Authorization is no longer eligible.");
+      }
+      if (current?.state === "expired") {
+        return {
+          intentId: intent.id,
+          transactionHash,
+          status: "expired",
+          authorizationIntentState: "expired",
+          chainVerificationStatus: null,
+          verified: false,
+          reason: "Authorization intent expired before verification began.",
+          observed: null,
+        };
+      }
+      if (
+        current?.state === "indeterminate" &&
+        current.transactionHash !== transactionHash
+      ) {
+        conflict(
+          "TRANSACTION_HASH_MISMATCH",
+          "An indeterminate authorization can only retry verification for the same transaction hash.",
+        );
+      }
+      const priorVerification =
+        this.database.getChainVerificationByTransactionHash(transactionHash);
+      if (priorVerification && priorVerification.authorizationIntentId !== intent.id) {
+        conflict(
+          "TRANSACTION_HASH_REPLAY",
+          "This NEAR transaction hash has already been associated with another authorization intent.",
+        );
+      }
+      conflict(
+        "AUTHORIZATION_REPLAY",
+        "Authorization intent has already been used or is being verified.",
+      );
+    }
+
+    let verification: NearTransactionVerification;
+    try {
+      verification = await this.verifier.verify({
+        transactionHash,
+        signerAccountId: started.authorizedWalletAccountId,
+        receiverAccountId: transaction.recipient,
+        amountYocto: transaction.amountYocto,
+      });
+    } catch {
+      verification = {
+        status: "unverified",
+        verified: false,
+        transactionHash,
+        finality: null,
+        reasons: [{
+          code: "VERIFIER_ERROR",
+          message: "Verifier could not complete; transaction outcome remains unverified.",
+        }],
+        observed: null,
+      };
+    }
+    if (
+      verification.transactionHash !== transactionHash ||
+      (verification.status === "verified" && !verification.verified)
+    ) {
+      verification = {
+        status: "unverified",
+        verified: false,
+        transactionHash,
+        finality: verification.finality,
+        reasons: [{
+          code: "INVALID_VERIFIER_RESULT",
+          message: "Verifier returned an inconsistent result; transaction outcome remains unverified.",
+        }],
+        observed: verification.observed,
+      };
+    }
+
+    const reason = verification.reasons
+      .map((item) => `${item.code}: ${item.message}`)
+      .join("; ");
+    const completed = this.database.completeAuthorizationIntentVerification({
+      authorizationIntentId: started.id,
+      transactionHash,
+      status: verification.status,
+      reason,
+      observedSignerAccountId: verification.observed?.signerAccountId ?? null,
+      observedReceiverAccountId: verification.observed?.receiverAccountId ?? null,
+      observedAmountYocto: verification.observed?.amountYocto ?? null,
+      verifiedAt: new Date().toISOString(),
+    });
+
+    if (completed.authorizationIntentState === "stale") {
+      return {
+        intentId: intent.id,
+        transactionHash,
+        status: "stale",
+        authorizationIntentState: "stale",
+        chainVerificationStatus: verification.status,
+        verified: false,
+        reason: "Authorization became stale or expired while verification was in progress.",
+        observed: verification.observed,
+      };
+    }
+    return {
+      intentId: intent.id,
+      transactionHash,
+      status: verification.status,
+      authorizationIntentState: completed.authorizationIntentState,
+      chainVerificationStatus: verification.status,
+      verified: verification.status === "verified",
+      reason,
+      observed: verification.observed,
+    };
+  }
+
+  revoke(
+    intentId: string,
+    authorizationToken: string,
+  ): AuthorizationRevocationResult {
+    if (
+      typeof intentId !== "string" ||
+      intentId.trim().length === 0 ||
+      typeof authorizationToken !== "string"
+    ) {
+      throw new TransactionAuthorizationError(
+        400,
+        "INVALID_INPUT",
+        "A valid authorization intent ID and token are required.",
+      );
+    }
+
+    const intent = this.database.getAuthorizationIntent(intentId);
+    if (!intent) {
+      throw new TransactionAuthorizationError(404, "NOT_FOUND", "Authorization intent not found.");
+    }
+    if (!this.matchesAuthorizationToken(intent, authorizationToken)) {
+      throw new TransactionAuthorizationError(
+        401,
+        "INVALID_AUTHORIZATION_TOKEN",
+        "Authorization token is invalid.",
+      );
+    }
+    if (intent.state === "revoked") {
+      conflict("AUTHORIZATION_REVOKED", "Authorization intent has already been revoked.");
+    }
+    if (intent.state === "expired" || Date.parse(intent.expiresAt) <= Date.now()) {
+      const result = this.database.revokeAuthorizationIntent(intentId, intent.tokenHash);
+      if (result.status === "expired") {
+        conflict("AUTHORIZATION_EXPIRED", "Expired authorization intents cannot be revoked or reused.");
+      }
+      conflict("AUTHORIZATION_NOT_REVOCABLE", "Authorization intent is no longer eligible for revocation.");
+    }
+    if (intent.state !== "issued") {
+      conflict(
+        "AUTHORIZATION_NOT_REVOCABLE",
+        "Only an issued authorization intent can be revoked.",
+      );
+    }
+
+    const result = this.database.revokeAuthorizationIntent(intentId, intent.tokenHash);
+    if (result.status === "revoked" && result.intent && result.revokedAt) {
+      return {
+        intentId: result.intent.id,
+        status: "revoked",
+        revokedAt: result.revokedAt,
+      };
+    }
+    if (result.status === "expired") {
+      conflict("AUTHORIZATION_EXPIRED", "Expired authorization intents cannot be revoked or reused.");
+    }
+    if (result.status === "stale") {
+      conflict("AUTHORIZATION_STALE", "Authorization eligibility changed before revocation.");
+    }
+    const current = this.database.getAuthorizationIntent(intentId);
+    if (current?.state === "revoked") {
+      conflict("AUTHORIZATION_REVOKED", "Authorization intent has already been revoked.");
+    }
+    if (current?.state === "expired") {
+      conflict("AUTHORIZATION_EXPIRED", "Expired authorization intents cannot be revoked or reused.");
+    }
+    conflict(
+      "AUTHORIZATION_NOT_REVOCABLE",
+      "Authorization intent is being verified or is no longer eligible for revocation.",
+    );
+  }
+
+  private matchesAuthorizationToken(
+    intent: AuthorizationIntentRecord,
+    token: string,
+  ): boolean {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token) || !/^[0-9a-f]{64}$/.test(intent.tokenHash)) {
+      return false;
+    }
+    const expectedHash = Buffer.from(intent.tokenHash, "hex");
+    const providedHash = createHash("sha256").update(token, "utf8").digest();
+    return expectedHash.length === providedHash.length &&
+      timingSafeEqual(expectedHash, providedHash);
+  }
+
+  private invalidateAsStale(
+    intent: AuthorizationIntentRecord,
+    transactionHash: string,
+    reason: string,
+  ): TransactionConfirmationResult {
+    const updated = this.database.invalidateAuthorizationIntent(intent.id, "stale", reason);
+    return this.staleResult(updated ?? intent, transactionHash, reason);
+  }
+
+  private staleResult(
+    intent: AuthorizationIntentRecord,
+    transactionHash: string,
+    reason: string,
+  ): TransactionConfirmationResult {
+    return {
+      intentId: intent.id,
+      transactionHash,
+      status: "stale",
+      authorizationIntentState: intent.state,
+      chainVerificationStatus: null,
+      verified: false,
+      reason,
+      observed: null,
+    };
   }
 
   private requireEligibleAgent(agent: AgentRecord): void {

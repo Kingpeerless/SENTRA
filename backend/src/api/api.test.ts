@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createApp } from "./app.js";
 import { SentraDatabase } from "../database/database.js";
+import type { TransactionVerifier } from "../services/transactionAuthorizationService.js";
 
 const NEAR = 10n ** 24n;
 type JsonResponse = {
@@ -24,10 +25,10 @@ interface Fixture {
   database: SentraDatabase;
 }
 
-async function createFixture(): Promise<Fixture> {
+async function createFixture(verifier?: TransactionVerifier): Promise<Fixture> {
   const directory = mkdtempSync(join(tmpdir(), "sentra-api-test-"));
   const database = new SentraDatabase(join(directory, "api.sqlite"));
-  const server: Server = createServer(createApp(database));
+  const server: Server = createServer(createApp(database, verifier));
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", resolve);
@@ -58,8 +59,11 @@ async function createFixture(): Promise<Fixture> {
   };
 }
 
-async function withFixture(run: (fixture: Fixture) => Promise<void>): Promise<void> {
-  const fixture = await createFixture();
+async function withFixture(
+  run: (fixture: Fixture) => Promise<void>,
+  verifier?: TransactionVerifier,
+): Promise<void> {
+  const fixture = await createFixture(verifier);
   try {
     await run(fixture);
   } finally {
@@ -554,5 +558,112 @@ test("wallet bindings have no public HTTP provisioning endpoint", async () => {
       fixture.database.getAgent(agentId)?.authorizedNearAccountId,
       null,
     );
+  });
+});
+
+test("preparation and confirmation API use saved transaction values and return verification status", async () => {
+  const verifier: TransactionVerifier = {
+    async verify(expectation) {
+      return {
+        status: "verified",
+        verified: true,
+        transactionHash: expectation.transactionHash,
+        finality: "FINAL",
+        reasons: [{ code: "VERIFIED", message: "Finalized native transfer matched." }],
+        observed: {
+          signerAccountId: expectation.signerAccountId,
+          receiverAccountId: expectation.receiverAccountId,
+          actionCount: 1,
+          actionType: "Transfer",
+          amountYocto: expectation.amountYocto,
+        },
+      };
+    },
+  };
+  await withFixture(async (fixture) => {
+    const agentId = await registerAgent(fixture);
+    fixture.database.setAgentAuthorizedNearAccount(agentId, "authorized.testnet");
+    const evaluation = await evaluate(fixture, agentId, "1");
+    assert.equal(evaluation.status, 201);
+
+    const overridden = await fixture.request(
+      `/api/transactions/${evaluation.json.data.transactionId}/prepare`,
+      "POST",
+      { recipient: "attacker.testnet", amountYocto: "999" },
+    );
+    assert.equal(overridden.status, 400);
+
+    const prepared = await fixture.request(
+      `/api/transactions/${evaluation.json.data.transactionId}/prepare`,
+      "POST",
+    );
+    assert.equal(prepared.status, 201);
+    assert.equal(prepared.json.data.recipient, "recipient.testnet");
+    assert.equal(prepared.json.data.amountYocto, "1");
+    assert.equal(prepared.json.data.expectedSignerAccountId, "authorized.testnet");
+    assert.equal(prepared.json.data.executed, false);
+
+    const confirmed = await fixture.request("/api/transactions/confirm", "POST", {
+      intentId: prepared.json.data.intentId,
+      authorizationToken: prepared.json.data.authorizationToken,
+      transactionHash: "6zgh2u9DqHHiXzdy9ouTP7oGky2T4nugbhqsK7wQHnZS",
+    });
+    assert.equal(confirmed.status, 200);
+    assert.equal(confirmed.json.data.status, "verified");
+    assert.equal(confirmed.json.data.verified, true);
+
+    const extraFields = await fixture.request("/api/transactions/confirm", "POST", {
+      intentId: prepared.json.data.intentId,
+      authorizationToken: prepared.json.data.authorizationToken,
+      transactionHash: "6zgh2u9DqHHiXzdy9ouTP7oGky2T4nugbhqsK7wQHnZS",
+      signerAccountId: "attacker.testnet",
+    });
+    assert.equal(extraFields.status, 400);
+  }, verifier);
+});
+
+test("revocation API requires the one-time token and never returns token material", async () => {
+  await withFixture(async (fixture) => {
+    const agentId = await registerAgent(fixture);
+    fixture.database.setAgentAuthorizedNearAccount(agentId, "authorized.testnet");
+    const evaluation = await evaluate(fixture, agentId, "1");
+    const prepared = await fixture.request(
+      `/api/transactions/${evaluation.json.data.transactionId}/prepare`,
+      "POST",
+    );
+    const intentId = prepared.json.data.intentId as string;
+    const token = prepared.json.data.authorizationToken as string;
+    const route = `/api/authorization-intents/${intentId}/revoke`;
+
+    assert.equal((await fixture.request(route, "POST", {})).status, 400);
+    assert.equal(
+      (await fixture.request(route, "POST", { authorizationToken: "x".repeat(43) })).status,
+      401,
+    );
+    assert.equal(
+      (await fixture.request(route, "POST", { authorizationToken: token, intentId })).status,
+      400,
+    );
+    const revoked = await fixture.request(route, "POST", { authorizationToken: token });
+    assert.equal(revoked.status, 200);
+    assert.equal(revoked.json.data.status, "revoked");
+    const responseText = JSON.stringify(revoked.json);
+    assert.equal(responseText.includes(token), false);
+    assert.equal(responseText.includes("tokenHash"), false);
+    assert.ok(
+      fixture.database.listAudit().some(
+        (event) =>
+          event.entityId === intentId &&
+          event.eventType === "authorization_intent.revoked",
+      ),
+    );
+
+    const confirm = await fixture.request("/api/transactions/confirm", "POST", {
+      intentId,
+      authorizationToken: token,
+      transactionHash: "6zgh2u9DqHHiXzdy9ouTP7oGky2T4nugbhqsK7wQHnZS",
+    });
+    assert.equal(confirm.status, 409);
+    assert.equal(confirm.json.error?.code, "AUTHORIZATION_REVOKED");
   });
 });

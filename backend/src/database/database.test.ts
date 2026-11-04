@@ -96,6 +96,7 @@ test("database initializes required tables and enables foreign keys", () => {
       "agents",
       "approvals",
       "audit_logs",
+      "authorization_intent_revocations",
       "authorization_intents",
       "chain_verifications",
       "decisions",
@@ -104,7 +105,7 @@ test("database initializes required tables and enables foreign keys", () => {
       "transactions",
     ]);
     assert.equal(database.connection.pragma("foreign_keys", { simple: true }), 1);
-    assert.equal(database.connection.pragma("user_version", { simple: true }), 3);
+    assert.equal(database.connection.pragma("user_version", { simple: true }), 4);
   });
 });
 
@@ -139,7 +140,7 @@ test("records persist after closing and reopening the database", () => {
   try {
     assert.equal(reopened.getAgent(created.agent.id)?.name, "Persistent agent");
     assert.equal(reopened.getCurrentPolicy(created.agent.id)?.version, "1");
-    assert.equal(reopened.connection.pragma("user_version", { simple: true }), 3);
+    assert.equal(reopened.connection.pragma("user_version", { simple: true }), 4);
   } finally {
     reopened.close();
     rmSync(directory, { recursive: true, force: true });
@@ -158,6 +159,10 @@ test("migrates the existing schema additively and preserves existing records", (
   const legacyConnection = new BetterSqlite3(filename);
   legacyConnection.pragma("foreign_keys = OFF");
   legacyConnection.exec(`
+    DROP TRIGGER authorization_intent_revocations_validate_insert;
+    DROP TRIGGER authorization_intent_revocations_protect_update;
+    DROP TRIGGER authorization_intent_revocations_protect_delete;
+    DROP TRIGGER authorization_intent_revocations_audit;
     DROP TRIGGER authorization_intents_validate_insert;
     DROP TRIGGER authorization_intents_validate_transition;
     DROP TRIGGER authorization_intents_protect_snapshot;
@@ -169,6 +174,7 @@ test("migrates the existing schema additively and preserves existing records", (
     DROP TRIGGER agents_validate_near_account_update;
     DROP TRIGGER agents_invalidate_outstanding_intents;
     DROP TRIGGER policies_invalidate_outstanding_intents;
+    DROP TABLE authorization_intent_revocations;
     DROP TABLE chain_verifications;
     DROP TABLE authorization_intents;
     DROP INDEX idx_agents_authorized_near_account;
@@ -179,7 +185,7 @@ test("migrates the existing schema additively and preserves existing records", (
 
   const migrated = new SentraDatabase(filename);
   try {
-    assert.equal(migrated.connection.pragma("user_version", { simple: true }), 3);
+    assert.equal(migrated.connection.pragma("user_version", { simple: true }), 4);
     assert.equal(migrated.getAgent(agent.id)?.authorizedNearAccountId, null);
     assert.deepEqual(migrated.getTransaction(evaluation.transactionId), before);
     assert.equal(migrated.getCurrentPolicy(agent.id)?.id, policy.id);
@@ -195,7 +201,7 @@ test("migrates the existing schema additively and preserves existing records", (
   }
 });
 
-test("migrates version 2 to version 3 while preserving authorization intents", () => {
+test("migrates version 2 to version 4 while preserving authorization intents", () => {
   const directory = mkdtempSync(join(tmpdir(), "sentra-db-v2-v3-migration-test-"));
   const filename = join(directory, "version-2.sqlite");
   const version2 = new SentraDatabase(filename);
@@ -241,6 +247,11 @@ test("migrates version 2 to version 3 while preserving authorization intents", (
 
   const legacyConnection = new BetterSqlite3(filename);
   legacyConnection.exec(`
+    DROP TRIGGER authorization_intent_revocations_validate_insert;
+    DROP TRIGGER authorization_intent_revocations_protect_update;
+    DROP TRIGGER authorization_intent_revocations_protect_delete;
+    DROP TRIGGER authorization_intent_revocations_audit;
+    DROP TABLE authorization_intent_revocations;
     DROP TRIGGER authorization_intents_validate_insert;
     CREATE TRIGGER authorization_intents_validate_insert
       BEFORE INSERT ON authorization_intents
@@ -284,7 +295,7 @@ test("migrates version 2 to version 3 while preserving authorization intents", (
 
   const migrated = new SentraDatabase(filename);
   try {
-    assert.equal(migrated.connection.pragma("user_version", { simple: true }), 3);
+    assert.equal(migrated.connection.pragma("user_version", { simple: true }), 4);
     assert.deepEqual(
       migrated.connection
         .prepare("SELECT * FROM authorization_intents ORDER BY id")
@@ -336,6 +347,125 @@ test("migrates version 2 to version 3 while preserving authorization intents", (
   }
 });
 
+test("version 2 without the insert trigger migrates safely and restores validation", () => {
+  const directory = mkdtempSync(join(tmpdir(), "sentra-db-v2-missing-trigger-test-"));
+  const filename = join(directory, "version-2-missing-trigger.sqlite");
+  const version2 = new SentraDatabase(filename);
+  const values = createAllowEvaluation(version2);
+  const existingIntent = createAuthorizationIntent(version2, values, "a".repeat(64));
+  version2.connection.exec(`
+    DROP TRIGGER authorization_intent_revocations_validate_insert;
+    DROP TRIGGER authorization_intent_revocations_protect_update;
+    DROP TRIGGER authorization_intent_revocations_protect_delete;
+    DROP TRIGGER authorization_intent_revocations_audit;
+    DROP TABLE authorization_intent_revocations;
+    DROP TRIGGER authorization_intents_validate_insert;
+  `);
+  version2.connection.pragma("user_version = 2");
+  version2.close();
+
+  const migrated = new SentraDatabase(filename);
+  try {
+    assert.equal(migrated.connection.pragma("user_version", { simple: true }), 4);
+    assert.equal(migrated.getAuthorizationIntent(existingIntent.id)?.state, "issued");
+    assert.equal(migrated.getAuthorizationIntent(existingIntent.id)?.tokenHash, "a".repeat(64));
+    assert.ok(
+      migrated.connection
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'authorization_intents_validate_insert'",
+        )
+        .get(),
+    );
+
+    assert.throws(
+      () =>
+        migrated.connection
+          .prepare(
+            `INSERT INTO authorization_intents
+             (id, transaction_id, decision_id, approval_id, token_hash, policy_id,
+              policy_version, authorized_wallet_account_id, expires_at, created_at, state)
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'issued')`,
+          )
+          .run(
+            "invalid-v2-upgrade-intent",
+            existingIntent.transactionId,
+            existingIntent.decisionId,
+            "b".repeat(64),
+            existingIntent.policyId,
+            "999",
+            existingIntent.authorizedWalletAccountId,
+            new Date(Date.now() + 60_000).toISOString(),
+            new Date().toISOString(),
+          ),
+      /authorization intent does not match eligible records/,
+    );
+  } finally {
+    migrated.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("migrates schema version 3 to version 4 without losing authorization records", () => {
+  const directory = mkdtempSync(join(tmpdir(), "sentra-db-v3-v4-migration-test-"));
+  const filename = join(directory, "version-3.sqlite");
+  const version3 = new SentraDatabase(filename);
+  const values = createAllowEvaluation(version3);
+  const intent = createAuthorizationIntent(version3, values, "c".repeat(64));
+  const intentBefore = version3.connection
+    .prepare("SELECT * FROM authorization_intents WHERE id = ?")
+    .get(intent.id);
+  version3.connection.exec(`
+    DROP TRIGGER authorization_intent_revocations_validate_insert;
+    DROP TRIGGER authorization_intent_revocations_protect_update;
+    DROP TRIGGER authorization_intent_revocations_protect_delete;
+    DROP TRIGGER authorization_intent_revocations_audit;
+    DROP TABLE authorization_intent_revocations;
+  `);
+  version3.connection.pragma("user_version = 3");
+  version3.close();
+
+  const migrated = new SentraDatabase(filename);
+  try {
+    assert.equal(migrated.connection.pragma("user_version", { simple: true }), 4);
+    assert.deepEqual(
+      migrated.connection
+        .prepare("SELECT * FROM authorization_intents WHERE id = ?")
+        .get(intent.id),
+      intentBefore,
+    );
+    assert.equal(migrated.getAuthorizationIntent(intent.id)?.state, "issued");
+    migrated.connection
+      .prepare("INSERT INTO authorization_intent_revocations (intent_id, revoked_at) VALUES (?, ?)")
+      .run(intent.id, new Date().toISOString());
+    assert.ok(
+      migrated.listAudit().some(
+        (event) =>
+          event.entityId === intent.id &&
+          event.eventType === "authorization_intent.revoked",
+      ),
+    );
+    assert.throws(
+      () =>
+        migrated.connection
+          .prepare(
+            "UPDATE authorization_intents SET state = 'verifying' WHERE id = ?",
+          )
+          .run(intent.id),
+      /invalid authorization intent state transition/,
+    );
+    assert.throws(
+      () =>
+        migrated.connection
+          .prepare("DELETE FROM authorization_intent_revocations WHERE intent_id = ?")
+          .run(intent.id),
+      /authorization revocations are immutable/,
+    );
+  } finally {
+    migrated.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("migration is repeatable and leaves existing schema version and rows unchanged", () => {
   const directory = mkdtempSync(join(tmpdir(), "sentra-db-migration-repeat-test-"));
   const filename = join(directory, "repeat.sqlite");
@@ -345,7 +475,7 @@ test("migration is repeatable and leaves existing schema version and rows unchan
 
   const second = new SentraDatabase(filename);
   try {
-    assert.equal(second.connection.pragma("user_version", { simple: true }), 3);
+    assert.equal(second.connection.pragma("user_version", { simple: true }), 4);
     assert.equal(second.getAgent(agent.id)?.id, agent.id);
     assert.equal(
       (
