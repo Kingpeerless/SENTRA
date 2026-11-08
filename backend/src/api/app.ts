@@ -2,6 +2,7 @@ import express, {
   type ErrorRequestHandler,
   type Response,
 } from "express";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { SentraDatabase } from "../database/database.js";
 import { SentraService, ServiceError } from "../services/sentraService.js";
@@ -134,6 +135,7 @@ function sendParsed<T>(
 export function createApp(
   database: SentraDatabase,
   transactionVerifier?: TransactionVerifier,
+  accessToken: string | undefined = process.env.SENTRA_ACCESS_TOKEN,
 ): express.Express {
   const app = express();
   const service = new SentraService(database);
@@ -143,10 +145,49 @@ export function createApp(
   );
   const threatLabService = new ThreatLabService(database);
   app.disable("x-powered-by");
+  app.use("/api", (request, response, next) => {
+    if (request.method === "GET" && request.path === "/health") {
+      next();
+      return;
+    }
+
+    if (!accessToken) {
+      response.status(503).json({
+        error: {
+          code: "AUTHENTICATION_NOT_CONFIGURED",
+          message: "SENTRA access authentication is not configured.",
+        },
+      });
+      return;
+    }
+
+    const authorization = request.get("authorization") ?? "";
+    const bearer = /^Bearer ([^\s]+)$/i.exec(authorization);
+    if (
+      !bearer ||
+      !timingSafeEqual(
+        createHash("sha256").update(bearer[1], "utf8").digest(),
+        createHash("sha256").update(accessToken, "utf8").digest(),
+      )
+    ) {
+      response.status(401).json({
+        error: {
+          code: "UNAUTHORIZED",
+          message: "A valid bearer token is required.",
+        },
+      });
+      return;
+    }
+    next();
+  });
   app.use(express.json({ limit: "32kb" }));
 
   app.get("/api/health", (_request, response) => {
     response.json({ status: "ok", message: "SENTRA backend is running" });
+  });
+
+  app.get("/api/auth/verify", (_request, response) => {
+    response.json({ data: { authenticated: true } });
   });
 
   app.get("/api/threat-lab/scenarios", (_request, response) => {

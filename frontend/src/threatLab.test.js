@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setAccessToken } from "./apiAccess.ts";
 import {
   loadThreatScenarios,
   parseThreatScenariosResponse,
   runThreatSimulation,
 } from "./threatLab.ts";
+
+setAccessToken("frontend-test-token");
 
 const scenarioIds = [
   "spending-limit-bypass",

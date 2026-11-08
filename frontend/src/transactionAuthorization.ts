@@ -1,3 +1,5 @@
+import { authenticatedApiFetch } from "./apiAccess.ts";
+
 export type TransactionDecision = "ALLOW" | "WARN" | "BLOCK";
 
 export interface SavedTransaction {
@@ -350,7 +352,7 @@ export async function prepareSavedTransaction(
     throw new Error("A saved transaction ID is required.");
   }
 
-  const response = await fetchImplementation(
+  const response = await authenticatedApiFetch(
     `/api/transactions/${encodeURIComponent(transactionId)}/prepare`,
     {
       method: "POST",
@@ -360,6 +362,7 @@ export async function prepareSavedTransaction(
       },
       body: "{}",
     },
+    fetchImplementation,
   );
 
   let payload: unknown;
@@ -388,7 +391,7 @@ export async function revokeAuthorizationIntent(
   ) {
     throw new Error("A valid authorization intent and temporary token are required for revocation.");
   }
-  const response = await fetchImplementation(
+  const response = await authenticatedApiFetch(
     `/api/authorization-intents/${encodeURIComponent(intentId)}/revoke`,
     {
       method: "POST",
@@ -398,6 +401,7 @@ export async function revokeAuthorizationIntent(
       },
       body: JSON.stringify({ authorizationToken }),
     },
+    fetchImplementation,
   );
   let payload: unknown;
   try {

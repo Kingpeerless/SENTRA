@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
+  ACCESS_TOKEN_EXPIRED_EVENT,
+  authenticatedApiFetch,
+  clearAccessToken,
+  setAccessToken,
+  verifyAccessToken,
+} from "./apiAccess";
+import {
   NearConnector,
   type Account,
   type NearWalletBase,
@@ -64,6 +71,10 @@ function isValidAccountId(accountId: string): boolean {
 }
 
 function App() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [accessTokenInput, setAccessTokenInput] = useState("");
+  const [accessBusy, setAccessBusy] = useState(false);
+  const [accessError, setAccessError] = useState<string | null>(null);
   const [status, setStatus] = useState<WalletStatus>("disconnected");
   const [accountId, setAccountId] = useState<string | null>(null);
   const [accountCheck, setAccountCheck] = useState<TestnetAccountVerification | null>(null);
@@ -129,6 +140,44 @@ function App() {
   const selectedAgentIdRef = useRef(selectedAgentId);
   const selectedTransactionIdRef = useRef(selectedTransactionId);
 
+  const handleAccessSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (accessBusy || accessTokenInput.length === 0) return;
+    setAccessBusy(true);
+    setAccessError(null);
+    try {
+      if (!await verifyAccessToken(accessTokenInput)) {
+        setAccessError("The access token was not accepted.");
+        return;
+      }
+      setAccessToken(accessTokenInput);
+      setAccessTokenInput("");
+      setIsAuthenticated(true);
+    } catch (error) {
+      setAccessError(
+        error instanceof Error ? error.message : "SENTRA could not verify the access token.",
+      );
+    } finally {
+      setAccessBusy(false);
+    }
+  };
+
+  const handleLogout = () => {
+    clearAuthorizationToken("session-ended");
+    clearAccessToken();
+    setAccessTokenInput("");
+    setAccessError(null);
+    setAgents([]);
+    setTransactions([]);
+    setApprovals([]);
+    setThreatLabResult(null);
+    setEvaluationResult(null);
+    setPreparedIntents({});
+    setAuthorizationTokenStates({});
+    setActiveAuthorizationTokenIntentId(null);
+    setIsAuthenticated(false);
+  };
+
   const clearAuthorizationToken = (reason: TemporaryTokenClearReason): string | null => {
     authorizationTokenGenerationRef.current += 1;
     const clearedToken = takeTemporaryAuthorizationToken(authorizationTokenRef, reason);
@@ -179,6 +228,20 @@ function App() {
       current === expiredIntentId ? null : current,
     );
   };
+
+  useEffect(() => {
+    const handleExpiredAccessToken = () => {
+      clearAuthorizationToken("session-ended");
+      clearAccessToken();
+      setAccessTokenInput("");
+      setAccessError("Your access session expired. Enter the token again.");
+      setIsAuthenticated(false);
+    };
+    window.addEventListener(ACCESS_TOKEN_EXPIRED_EVENT, handleExpiredAccessToken);
+    return () => {
+      window.removeEventListener(ACCESS_TOKEN_EXPIRED_EVENT, handleExpiredAccessToken);
+    };
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -270,7 +333,7 @@ function App() {
       connector.off("wallet:signIn", handleSignIn);
       connector.off("wallet:signOut", handleSignOut);
     };
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
     if (!accountId) {
@@ -356,7 +419,7 @@ function App() {
       setRegistrationOpen(false);
 
       try {
-        const response = await fetch("/api/agents", {
+        const response = await authenticatedApiFetch("/api/agents", {
           headers: { accept: "application/json" },
           cache: "no-store",
         });
@@ -704,6 +767,7 @@ function App() {
   }, [selectedTransactionId]);
 
   useEffect(() => {
+    if (!isAuthenticated) return;
     let active = true;
     let requestInProgress = false;
 
@@ -711,7 +775,7 @@ function App() {
       if (requestInProgress) return;
       requestInProgress = true;
       try {
-        const response = await fetch("/api/agents", {
+        const response = await authenticatedApiFetch("/api/agents", {
           method: "GET",
           headers: { accept: "application/json" },
           cache: "no-store",
@@ -769,9 +833,10 @@ function App() {
       window.clearInterval(intervalId);
       window.removeEventListener("focus", loadAgents);
     };
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
+    if (!isAuthenticated) return;
     let active = true;
     void loadThreatScenarios()
       .then((scenarios) => {
@@ -796,9 +861,10 @@ function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
+    if (!isAuthenticated) return;
     if (!activeAuthorizationTokenIntentId) return;
     const activeToken = authorizationTokenRef.current;
     if (!activeToken || activeToken.intentId !== activeAuthorizationTokenIntentId) return;
@@ -809,7 +875,7 @@ function App() {
       if (requestInProgress) return;
       requestInProgress = true;
       try {
-        const response = await fetch(
+        const response = await authenticatedApiFetch(
           `/api/agents/${encodeURIComponent(activeToken.agentId)}/policy`,
           {
             headers: { accept: "application/json" },
@@ -863,9 +929,10 @@ function App() {
       window.removeEventListener("focus", checkCurrentPolicy);
       window.removeEventListener("pagehide", clearOnPageHide);
     };
-  }, [activeAuthorizationTokenIntentId, preparedIntents]);
+  }, [activeAuthorizationTokenIntentId, isAuthenticated, preparedIntents]);
 
   useEffect(() => {
+    if (!isAuthenticated) return;
     let active = true;
     let requestInProgress = false;
 
@@ -924,6 +991,58 @@ function App() {
     clearAuthorizationToken("session-ended");
   }, []);
 
+  if (!isAuthenticated) {
+    return (
+      <main className="app-shell">
+        <header className="brand">
+          <div className="brand-mark" aria-hidden="true">
+            <span />
+          </div>
+          <span className="brand-name">SENTRA</span>
+          <span className="brand-divider" />
+          <span className="brand-section">Operator access</span>
+        </header>
+
+        <section className="wallet-panel access-panel" aria-labelledby="access-title">
+          <div className="panel-kicker">
+            <span className="status-dot" />
+            SECURE OPERATOR ACCESS
+          </div>
+          <h1 id="access-title">Access SENTRA</h1>
+          <p className="panel-description">
+            Enter the shared operator token to open the local SENTRA dashboard.
+          </p>
+          <form className="access-form" onSubmit={(event) => void handleAccessSubmit(event)}>
+            <label className="agent-select-label" htmlFor="sentra-access-token">
+              Access token
+            </label>
+            <input
+              id="sentra-access-token"
+              className="agent-select"
+              type="password"
+              autoComplete="current-password"
+              value={accessTokenInput}
+              onChange={(event) => setAccessTokenInput(event.target.value)}
+              required
+              disabled={accessBusy}
+            />
+            {accessError && <p className="auth-error" role="alert">{accessError}</p>}
+            <button
+              className="primary-button access-submit"
+              type="submit"
+              disabled={accessBusy || accessTokenInput.length === 0}
+            >
+              {accessBusy ? "Verifying..." : "Continue"}
+            </button>
+            <p className="privacy-note">
+              The token is kept in memory only and is cleared when you log out or close this page.
+            </p>
+          </form>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell">
       <header className="brand">
@@ -933,6 +1052,9 @@ function App() {
         <span className="brand-name">SENTRA</span>
         <span className="brand-divider" />
         <span className="brand-section">Wallet connection</span>
+        <button className="secondary-button logout-button" type="button" onClick={handleLogout}>
+          Log out
+        </button>
       </header>
 
       <section className="wallet-panel" aria-labelledby="wallet-title">

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setAccessToken } from "./apiAccess.ts";
 import {
   canPrepareSavedTransaction,
   clearTemporaryAuthorizationToken,
@@ -14,6 +15,8 @@ import {
   takeTemporaryAuthorizationToken,
   isSigningEligibleForNetwork,
 } from "./transactionAuthorization.ts";
+
+setAccessToken("frontend-test-token");
 
 const transaction = {
   id: "tx-1",

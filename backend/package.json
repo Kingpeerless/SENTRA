@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
     "provision-wallet": "tsx src/cli/provisionAgentWalletBinding.ts",
     "test": "node --import tsx --test src/engine/policyEngine.test.ts src/database/database.test.ts src/api/api.test.ts src/services/nearTestnetTransactionVerifier.test.ts src/services/transactionAuthorizationService.test.ts src/cli/provisionAgentWalletBinding.test.ts",
     "typecheck": "tsc --noEmit"

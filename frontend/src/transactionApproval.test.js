@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setAccessToken } from "./apiAccess.ts";
 import {
   getPendingWarnApprovals,
   reviewWarnApproval,
 } from "./transactionApproval.ts";
+
+setAccessToken("frontend-test-token");
 
 const transaction = {
   id: "tx-warn",

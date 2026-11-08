@@ -82,10 +82,11 @@ Clone the repository and install dependencies.
 ```sh
 cd backend
 npm install
+export SENTRA_ACCESS_TOKEN="$(openssl rand -hex 32)"
 npm run dev
 ```
 
-The backend listens on `127.0.0.1:3001`.
+The backend listens on `127.0.0.1:3001`. Keep the generated token in the backend process environment and enter it on the SENTRA access screen. Do not put it in frontend/Vite environment variables or commit it. The access screen keeps the token in memory only; logging out or reloading the page clears it.
 
 **Frontend**
 
@@ -104,6 +105,18 @@ http://localhost:5173
 ```
 
 The Vite development server proxies `/api` requests to the local backend.
+
+For a production-mode backend, build the TypeScript output before installing only runtime dependencies:
+
+```sh
+cd backend
+npm ci
+npm run build
+npm prune --omit=dev
+npm start
+```
+
+Inject `SENTRA_ACCESS_TOKEN` using the host's secret manager or runtime secret configuration, and provide the same value to operators out-of-band. `GET /api/health` is the only public API route; every other `/api` route, including `GET /api/auth/verify`, requires the shared bearer token. Without a configured token, protected routes return HTTP 503. The backend binds to loopback by default. Keep the service and any same-origin `/api` proxy on a trusted private host/network, and do not publish the backend port or expose it publicly. Vite's proxy applies only to local development; production hosting must preserve the same-origin `/api` route without making the backend directly reachable from the public internet.
 
 ## Testing
 Backend:
@@ -125,8 +138,8 @@ npm run build
 ## Important Security Limitations
 SENTRA is currently a local development and hackathon demonstration.
 
-- The backend API does not implement user authentication or authorization and must not be exposed publicly.
-- Reviewer identity is not authenticated.
+- The backend uses one shared bearer token for API access; it does not provide individual user identities or roles and must not be exposed publicly.
+- Reviewer identity is not authenticated; a shared token does not establish a reviewer's personal identity.
 - Wallet connection and Testnet account existence do not prove the wallet's active network. The dashboard therefore displays the active wallet network as **UNVERIFIED**.
 - The current frontend does not sign, broadcast or execute transactions.
 - Authorization preparation does not mean a transaction has been executed.

@@ -1,4 +1,5 @@
 import type { TransactionDecision } from "./transactionAuthorization.ts";
+import { authenticatedApiFetch } from "./apiAccess.ts";
 
 export const THREAT_SCENARIO_IDS = [
   "spending-limit-bypass",
@@ -106,11 +107,11 @@ export function parseThreatScenariosResponse(payload: unknown): ThreatScenario[]
 export async function loadThreatScenarios(
   fetchImplementation: typeof fetch = fetch,
 ): Promise<ThreatScenario[]> {
-  const response = await fetchImplementation("/api/threat-lab/scenarios", {
+  const response = await authenticatedApiFetch("/api/threat-lab/scenarios", {
     method: "GET",
     headers: { accept: "application/json" },
     cache: "no-store",
-  });
+  }, fetchImplementation);
   let payload: unknown;
   try {
     payload = await response.json();
@@ -217,14 +218,14 @@ export async function runThreatSimulation(
   if (typeof agentId !== "string" || agentId.trim().length === 0 || !isScenarioId(scenarioId)) {
     throw new Error("Select a registered agent and a supported Threat Lab scenario.");
   }
-  const response = await fetchImplementation("/api/threat-lab/simulate", {
+  const response = await authenticatedApiFetch("/api/threat-lab/simulate", {
     method: "POST",
     headers: {
       accept: "application/json",
       "content-type": "application/json",
     },
     body: JSON.stringify({ agentId, scenarioId }),
-  });
+  }, fetchImplementation);
   let payload: unknown;
   try {
     payload = await response.json();
@@ -238,11 +239,11 @@ export async function runThreatSimulation(
 
   let auditEvent: ThreatAuditEvent | null = null;
   try {
-    const auditResponse = await fetchImplementation("/api/audit", {
+    const auditResponse = await authenticatedApiFetch("/api/audit", {
       method: "GET",
       headers: { accept: "application/json" },
       cache: "no-store",
-    });
+    }, fetchImplementation);
     if (auditResponse.ok) {
       auditEvent = findAuditEvent(await auditResponse.json(), simulation.id);
     }

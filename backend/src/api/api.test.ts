@@ -9,6 +9,7 @@ import { SentraDatabase } from "../database/database.js";
 import type { TransactionVerifier } from "../services/transactionAuthorizationService.js";
 
 const NEAR = 10n ** 24n;
+const ACCESS_TOKEN = "test-sentra-access-token";
 type JsonResponse = {
   data?: any;
   error?: { code: string; message: string };
@@ -17,7 +18,7 @@ type JsonResponse = {
 };
 
 interface Fixture {
-  request(path: string, method?: string, body?: unknown): Promise<{
+  request(path: string, method?: string, body?: unknown, authorization?: string | null): Promise<{
     status: number;
     json: JsonResponse;
   }>;
@@ -25,10 +26,13 @@ interface Fixture {
   database: SentraDatabase;
 }
 
-async function createFixture(verifier?: TransactionVerifier): Promise<Fixture> {
+async function createFixture(
+  verifier?: TransactionVerifier,
+  configuredToken: string | undefined = ACCESS_TOKEN,
+): Promise<Fixture> {
   const directory = mkdtempSync(join(tmpdir(), "sentra-api-test-"));
   const database = new SentraDatabase(join(directory, "api.sqlite"));
-  const server: Server = createServer(createApp(database, verifier));
+  const server: Server = createServer(createApp(database, verifier, configuredToken));
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", resolve);
@@ -41,10 +45,14 @@ async function createFixture(verifier?: TransactionVerifier): Promise<Fixture> {
 
   return {
     database,
-    async request(path, method = "GET", body) {
+    async request(path, method = "GET", body, authorization = `Bearer ${ACCESS_TOKEN}`) {
+      const headers = new Headers(
+        body === undefined ? undefined : { "content-type": "application/json" },
+      );
+      if (authorization !== null) headers.set("authorization", authorization);
       const response = await fetch(`${baseUrl}${path}`, {
         method,
-        headers: body === undefined ? undefined : { "content-type": "application/json" },
+        headers,
         body: body === undefined ? undefined : JSON.stringify(body),
       });
       return { status: response.status, json: (await response.json()) as JsonResponse };
@@ -105,6 +113,37 @@ test("health endpoint remains available", async () => {
     assert.equal(result.json.status, "ok");
     assert.equal(result.json.message, "SENTRA backend is running");
   });
+});
+
+test("business endpoints reject missing and invalid bearer tokens without echoing them", async () => {
+  await withFixture(async ({ request }) => {
+    const missing = await request("/api/agents", "GET", undefined, null);
+    const invalid = await request("/api/agents", "GET", undefined, "Bearer wrong-secret");
+    const verified = await request("/api/auth/verify");
+
+    assert.equal(missing.status, 401);
+    assert.equal(invalid.status, 401);
+    assert.equal(verified.status, 200);
+    assert.deepEqual(verified.json.data, { authenticated: true });
+    assert.equal(JSON.stringify(invalid.json).includes("wrong-secret"), false);
+  });
+});
+
+test("protected endpoints fail closed when SENTRA_ACCESS_TOKEN is not configured", async () => {
+  const fixture = await createFixture(undefined, "");
+  try {
+    const health = await fixture.request("/api/health", "GET", undefined, null);
+    const protectedResponse = await fixture.request("/api/auth/verify");
+
+    assert.equal(health.status, 200);
+    assert.equal(protectedResponse.status, 503);
+    assert.equal(
+      protectedResponse.json.error?.code,
+      "AUTHENTICATION_NOT_CONFIGURED",
+    );
+  } finally {
+    await fixture.close();
+  }
 });
 
 test("Threat Lab lists and simulates every deterministic attack scenario", async () => {

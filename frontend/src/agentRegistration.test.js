@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { registerAgent } from "./agentRegistration.ts";
+import { setAccessToken } from "./apiAccess.ts";
+
+setAccessToken("frontend-test-token");
 
 const createdAgent = {
   id: "agent-123",
@@ -29,6 +32,7 @@ test("registers an agent through the existing API with trimmed name and descript
 
   assert.equal(requestUrl, "/api/agents");
   assert.equal(requestInit.method, "POST");
+  assert.equal(requestInit.headers.get("authorization"), "Bearer frontend-test-token");
   assert.deepEqual(JSON.parse(requestInit.body), {
     name: "Sentra Treasury",
     description: "Treasury operator",

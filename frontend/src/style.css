@@ -95,6 +95,37 @@ button {
   box-shadow: 0 32px 90px rgba(0, 0, 0, 0.28);
 }
 
+.access-panel {
+  max-width: 480px;
+}
+
+.access-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 28px;
+}
+
+.access-submit {
+  justify-self: start;
+  min-width: 132px;
+  margin-top: 5px;
+}
+
+.auth-error {
+  margin: 0;
+  color: #f0ad9e;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.logout-button {
+  min-width: 90px;
+  min-height: 34px;
+  margin-left: auto;
+  padding: 0 12px;
+  font-size: 11px;
+}
+
 .panel-kicker {
   display: flex;
   align-items: center;

@@ -2,11 +2,33 @@
 
 ## Local API and database
 
-Run `npm run dev` from this directory. The backend stores its SQLite database at `backend/data/sentra.sqlite` by default. Set `DATABASE_PATH` to use a different local file.
+Run `npm run dev` from this directory. The backend stores its SQLite database at `backend/data/sentra.sqlite` by default. Set `DATABASE_PATH` to use a different local file. The server binds to `127.0.0.1` by default.
+
+## Shared access token
+
+Every `/api` route except `GET /api/health` requires `Authorization: Bearer <token>`. Set `SENTRA_ACCESS_TOKEN` in the backend process environment before starting the server. Generate a unique, high-entropy value (for example, `openssl rand -hex 32`) and provide it through your operating system's secret manager or deployment secret facility. Do not commit it, put it in frontend/Vite configuration, or include it in logs. The operator enters the same value on the SENTRA access screen; the frontend holds it in memory only.
+
+If `SENTRA_ACCESS_TOKEN` is unset or empty, protected API requests fail with HTTP 503; the public health endpoint remains available. Missing or invalid request credentials receive HTTP 401. Authentication uses a shared operator credential and does not provide individual identities or roles. Treat the API as a private local service and do not expose it publicly.
+
+The checked-in `.gitignore` excludes `.env` files, a `secrets/` directory, and common key/secret-file extensions. Prefer runtime secret injection over local secret files.
+
+## Build and deployment
+
+For a production-mode backend install, build while development dependencies are available, then remove them and start the compiled output:
+
+```sh
+npm ci
+npm run build
+npm prune --omit=dev
+npm start
+```
+
+Inject `SENTRA_ACCESS_TOKEN` and, if needed, `DATABASE_PATH` through the runtime environment before `npm start`. The backend remains bound to loopback. Keep the frontend and backend on a trusted host/private network; if a same-origin web server is used, route `/api` to `127.0.0.1:3001` without making the backend port publicly reachable. Vite's `/api` proxy is for local development only. No public deployment or reverse-proxy configuration is provided by this project.
 
 Routes use `{ "data": ... }` for successful API responses and `{ "error": { "code": ..., "message": ... } }` for errors. Available routes:
 
 - `GET /api/health`
+- `GET /api/auth/verify` (protected; verifies the bearer token)
 - `GET|POST /api/agents`
 - `GET|PATCH /api/agents/:agentId`
 - `GET|PUT /api/agents/:agentId/policy`
@@ -40,7 +62,7 @@ Transaction evaluation accepts an `agentId` and a `transaction` proposal. The pr
 }
 ```
 
-The approval reviewer field is only a local hackathon demonstration value. This API has no production authentication or authorization, and a submitted reviewer name does not establish a real person's identity.
+The shared bearer token gates the API, but the approval reviewer field remains a local hackathon demonstration value. It is not tied to an individual identity, and this API does not provide user roles.
 
 Approving a pending WARN records a local review decision only. It does not sign, broadcast, or execute a blockchain transaction. SENTRA's local demo also does not prevent users from bypassing this application and transferring directly through their own wallets.
 
@@ -50,7 +72,7 @@ Revocation requires the original one-time token in the request body; an intent I
 
 The wallet connector does not provide trustworthy active-network identity. SENTRA therefore displays the wallet network as **UNVERIFIED** even when the connector requests Testnet or the account exists on Testnet. No wallet-signing operation is implemented or should be enabled while active network identity cannot be independently verified.
 
-The development server binds only to `127.0.0.1`. These APIs have no user authentication and must not be exposed through a public interface, reverse proxy, or network bind. This local-only restriction is not a substitute for production authentication, authorization, CSRF defenses, or deployment security.
+The server binds only to `127.0.0.1` by default and must remain private. A shared bearer token is not a substitute for individual user identity, roles, or a full production security review; do not expose the backend publicly.
 
 ## Provision an agent's NEAR testnet wallet binding
 

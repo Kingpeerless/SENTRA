@@ -2,6 +2,7 @@ import type {
   SavedApproval,
   SavedTransaction,
 } from "./transactionAuthorization.ts";
+import { authenticatedApiFetch } from "./apiAccess.ts";
 
 export interface PendingWarnApproval {
   approval: SavedApproval;
@@ -62,7 +63,7 @@ export async function reviewWarnApproval(
     throw new Error("Enter a reason before rejecting this WARN approval.");
   }
 
-  const response = await fetchImplementation(
+  const response = await authenticatedApiFetch(
     `/api/approvals/${encodeURIComponent(approval.id)}/${action}`,
     {
       method: "POST",
@@ -79,6 +80,7 @@ export async function reviewWarnApproval(
             },
       ),
     },
+    fetchImplementation,
   );
 
   let payload: unknown;

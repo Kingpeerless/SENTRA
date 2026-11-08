@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "node --experimental-strip-types --test src/nearAccountVerification.test.js src/walletBinding.test.js src/agentRegistration.test.js src/transactionAuthorization.test.js src/transactionComposer.test.js src/transactionApproval.test.js src/threatLab.test.js",
+    "test": "node --experimental-strip-types --test src/apiAccess.test.js src/nearAccountVerification.test.js src/walletBinding.test.js src/agentRegistration.test.js src/transactionAuthorization.test.js src/transactionComposer.test.js src/transactionApproval.test.js src/threatLab.test.js",
     "test:wallet-identity": "node --experimental-strip-types --test src/nearAccountVerification.test.js src/walletBinding.test.js src/agentRegistration.test.js"
   },
   "dependencies": {

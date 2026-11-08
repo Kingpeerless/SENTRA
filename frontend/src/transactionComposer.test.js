@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setAccessToken } from "./apiAccess.ts";
 import {
   loadTransactionReviewData,
   nearToYocto,
   submitTransactionEvaluation,
   validateRecipient,
 } from "./transactionComposer.ts";
+
+setAccessToken("frontend-test-token");
 
 function jsonResponse(payload, status = 201) {
   return new Response(JSON.stringify(payload), {

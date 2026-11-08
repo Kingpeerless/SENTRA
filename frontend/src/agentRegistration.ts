@@ -1,4 +1,5 @@
 import type { AgentWalletBinding } from "./walletBinding";
+import { authenticatedApiFetch } from "./apiAccess.ts";
 
 export interface NewAgentInput {
   name: string;
@@ -52,14 +53,14 @@ export async function registerAgent(
     throw new Error("Description must be 2000 characters or fewer.");
   }
 
-  const response = await fetchImplementation("/api/agents", {
+  const response = await authenticatedApiFetch("/api/agents", {
     method: "POST",
     headers: {
       accept: "application/json",
       "content-type": "application/json",
     },
     body: JSON.stringify({ name, description }),
-  });
+  }, fetchImplementation);
 
   let payload: unknown;
   try {

@@ -5,6 +5,7 @@ import {
   type SavedTransaction,
   type TransactionDecision,
 } from "./transactionAuthorization.ts";
+import { authenticatedApiFetch } from "./apiAccess.ts";
 
 const ACCOUNT_ID_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
 const YOCTO_PER_NEAR = 10n ** 24n;
@@ -138,7 +139,7 @@ export async function submitTransactionEvaluation(
   }
   const recipient = validateRecipient(input.recipient);
   const amountYocto = nearToYocto(input.amountNear);
-  const response = await fetchImplementation("/api/transactions/evaluate", {
+  const response = await authenticatedApiFetch("/api/transactions/evaluate", {
     method: "POST",
     headers: {
       accept: "application/json",
@@ -155,7 +156,7 @@ export async function submitTransactionEvaluation(
         reason: "Operator-submitted transaction evaluation",
       },
     }),
-  });
+  }, fetchImplementation);
 
   let payload: unknown;
   try {
@@ -171,16 +172,16 @@ export async function loadTransactionReviewData(
   fetchImplementation: typeof fetch = fetch,
 ): Promise<TransactionReviewData> {
   const [transactionsResponse, approvalsResponse] = await Promise.all([
-    fetchImplementation("/api/transactions", {
+    authenticatedApiFetch("/api/transactions", {
       method: "GET",
       headers: { accept: "application/json" },
       cache: "no-store",
-    }),
-    fetchImplementation("/api/approvals", {
+    }, fetchImplementation),
+    authenticatedApiFetch("/api/approvals", {
       method: "GET",
       headers: { accept: "application/json" },
       cache: "no-store",
-    }),
+    }, fetchImplementation),
   ]);
   if (!transactionsResponse.ok || !approvalsResponse.ok) {
     throw new Error("SENTRA could not load saved transactions and approval records.");
