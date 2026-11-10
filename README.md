@@ -86,7 +86,7 @@ export SENTRA_ACCESS_TOKEN="$(openssl rand -hex 32)"
 npm run dev
 ```
 
-The backend listens on `127.0.0.1:3001`. Keep the generated token in the backend process environment and enter it on the SENTRA access screen. Do not put it in frontend/Vite environment variables or commit it. The access screen keeps the token in memory only; logging out or reloading the page clears it.
+Locally, the backend listens on `127.0.0.1:3001`; in production (`NODE_ENV=production`) it binds to `0.0.0.0` and uses `PORT` when set. Keep the generated token in the backend process environment and enter it on the SENTRA access screen. Do not put it in frontend/Vite environment variables or commit it. The access screen keeps the token in memory only; logging out or reloading the page clears it.
 
 **Frontend**
 
@@ -106,17 +106,25 @@ http://localhost:5173
 
 The Vite development server proxies `/api` requests to the local backend.
 
-For a production-mode backend, build the TypeScript output before installing only runtime dependencies:
+## Render free web service
+
+The repository includes [render.yaml](./render.yaml) for a single free web service. In Render, create a Blueprint from this repository and provide a high-entropy `SENTRA_ACCESS_TOKEN` when prompted. Keep the token in Render's environment settings and share it with operators out of band. It is read only by the backend and is never configured as a Vite variable or included in the frontend bundle.
+
+The Blueprint builds the frontend first and then the backend; the backend serves `frontend/dist` and the `/api` routes from the same origin. It uses `PORT` provided by Render and binds to `0.0.0.0`. `DATABASE_PATH=./data/sentra.sqlite` is relative to the backend working directory. Render's free web-service filesystem is ephemeral: the SQLite database can be lost when the service restarts, redeploys, or is replaced. Do not use this deployment for durable records or funds-sensitive workflows. No persistent disk, paid service, or external database is configured.
+
+To configure the same service manually, use:
 
 ```sh
-cd backend
-npm ci
-npm run build
-npm prune --omit=dev
-npm start
+npm ci --prefix frontend && npm run build --prefix frontend && npm ci --prefix backend && npm run build --prefix backend
 ```
 
-Inject `SENTRA_ACCESS_TOKEN` using the host's secret manager or runtime secret configuration, and provide the same value to operators out-of-band. `GET /api/health` is the only public API route; every other `/api` route, including `GET /api/auth/verify`, requires the shared bearer token. Without a configured token, protected routes return HTTP 503. The backend binds to loopback by default. Keep the service and any same-origin `/api` proxy on a trusted private host/network, and do not publish the backend port or expose it publicly. Vite's proxy applies only to local development; production hosting must preserve the same-origin `/api` route without making the backend directly reachable from the public internet.
+Start command:
+
+```sh
+cd backend && npm start
+```
+
+Configure `SENTRA_ACCESS_TOKEN` and `DATABASE_PATH=./data/sentra.sqlite` in the Render environment. Render supplies `PORT`. `GET /api/health` remains public; every other `/api` route, including `GET /api/auth/verify`, requires the shared bearer token. If `SENTRA_ACCESS_TOKEN` is missing, protected routes fail closed with HTTP 503.
 
 ## Testing
 Backend:
@@ -138,15 +146,16 @@ npm run build
 ## Important Security Limitations
 SENTRA is currently a local development and hackathon demonstration.
 
-- The backend uses one shared bearer token for API access; it does not provide individual user identities or roles and must not be exposed publicly.
+- The backend uses one shared bearer token for API access; it does not provide individual user identities or roles. A Render web service has a public HTTPS URL: only `GET /api/health` is unauthenticated, while every other API route requires the shared token.
 - Reviewer identity is not authenticated; a shared token does not establish a reviewer's personal identity.
 - Wallet connection and Testnet account existence do not prove the wallet's active network. The dashboard therefore displays the active wallet network as **UNVERIFIED**.
 - The current frontend does not sign, broadcast or execute transactions.
 - Authorization preparation does not mean a transaction has been executed.
 - Threat Lab scenarios are deterministic simulations rather than attacks on a live AI agent.
 - The NEAR Testnet verifier checks submitted transaction hashes; it does not submit transactions.
+- Rendering the frontend and API on one origin does not add wallet signing, transaction execution protection, durable storage, or authenticated individual reviewer identities.
 
-SENTRA must not be represented as production-ready transaction execution infrastructure.
+SENTRA must not be represented as production-ready transaction signing or execution-protection infrastructure. The Render free deployment is a publicly reachable demonstration service with shared-token API authentication and ephemeral SQLite storage; do not use it for production-sensitive or durable workflows.
 
 ## Project Status
 The current implementation demonstrates deterministic transaction security, agent identity binding, authorization preparation and revocation, approval workflows, audit records, and synthetic attack simulations.

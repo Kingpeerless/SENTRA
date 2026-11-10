@@ -2,19 +2,19 @@
 
 ## Local API and database
 
-Run `npm run dev` from this directory. The backend stores its SQLite database at `backend/data/sentra.sqlite` by default. Set `DATABASE_PATH` to use a different local file. The server binds to `127.0.0.1` by default.
+Run `npm run dev` from this directory. The backend stores its SQLite database at `backend/data/sentra.sqlite` by default. Set `DATABASE_PATH` to use a different local file. The server uses `PORT` when set (default `3001`), binds to `127.0.0.1` locally, and binds to `0.0.0.0` when `NODE_ENV=production`.
 
 ## Shared access token
 
 Every `/api` route except `GET /api/health` requires `Authorization: Bearer <token>`. Set `SENTRA_ACCESS_TOKEN` in the backend process environment before starting the server. Generate a unique, high-entropy value (for example, `openssl rand -hex 32`) and provide it through your operating system's secret manager or deployment secret facility. Do not commit it, put it in frontend/Vite configuration, or include it in logs. The operator enters the same value on the SENTRA access screen; the frontend holds it in memory only.
 
-If `SENTRA_ACCESS_TOKEN` is unset or empty, protected API requests fail with HTTP 503; the public health endpoint remains available. Missing or invalid request credentials receive HTTP 401. Authentication uses a shared operator credential and does not provide individual identities or roles. Treat the API as a private local service and do not expose it publicly.
+If `SENTRA_ACCESS_TOKEN` is unset or empty, protected API requests fail with HTTP 503; the public health endpoint remains available. Missing or invalid request credentials receive HTTP 401. Authentication uses a shared operator credential and does not provide individual identities or roles. On Render, the web service is publicly reachable over HTTPS, but all business/API routes require the shared token; keep the token secret and do not treat this as production-grade identity or transaction-execution security.
 
 The checked-in `.gitignore` excludes `.env` files, a `secrets/` directory, and common key/secret-file extensions. Prefer runtime secret injection over local secret files.
 
 ## Build and deployment
 
-For a production-mode backend install, build while development dependencies are available, then remove them and start the compiled output:
+For a standalone production-mode backend install, build while development dependencies are available, then remove them and start the compiled output:
 
 ```sh
 npm ci
@@ -23,7 +23,13 @@ npm prune --omit=dev
 npm start
 ```
 
-Inject `SENTRA_ACCESS_TOKEN` and, if needed, `DATABASE_PATH` through the runtime environment before `npm start`. The backend remains bound to loopback. Keep the frontend and backend on a trusted host/private network; if a same-origin web server is used, route `/api` to `127.0.0.1:3001` without making the backend port publicly reachable. Vite's `/api` proxy is for local development only. No public deployment or reverse-proxy configuration is provided by this project.
+Inject `SENTRA_ACCESS_TOKEN` and, if needed, `DATABASE_PATH` through the runtime environment before `npm start`. If the built frontend exists at `../frontend/dist`, the backend serves it and the API from the same origin. The Vite `/api` proxy remains for local development.
+
+## Render deployment
+
+The repository-level `render.yaml` configures one Render free web service. The build command builds `frontend` before `backend`; the start command runs `npm start` from this directory. The backend binds to `0.0.0.0` and uses Render's `PORT`. Configure `SENTRA_ACCESS_TOKEN` as a Render secret and keep it out of frontend/Vite variables.
+
+Render sets `DATABASE_PATH=./data/sentra.sqlite`, relative to the backend working directory. Render free web-service storage is ephemeral: SQLite data may disappear on restart, redeploy, or service replacement. The Blueprint does not configure persistent disks, paid services, or external databases. Do not rely on this deployment for durable records or production transaction execution.
 
 Routes use `{ "data": ... }` for successful API responses and `{ "error": { "code": ..., "message": ... } }` for errors. Available routes:
 
@@ -72,7 +78,7 @@ Revocation requires the original one-time token in the request body; an intent I
 
 The wallet connector does not provide trustworthy active-network identity. SENTRA therefore displays the wallet network as **UNVERIFIED** even when the connector requests Testnet or the account exists on Testnet. No wallet-signing operation is implemented or should be enabled while active network identity cannot be independently verified.
 
-The server binds only to `127.0.0.1` by default and must remain private. A shared bearer token is not a substitute for individual user identity, roles, or a full production security review; do not expose the backend publicly.
+The backend binds to `0.0.0.0` as required by Render. A Render web service is publicly reachable over HTTPS; the health check is unauthenticated and all other API routes require the shared bearer token. A shared token is not a substitute for individual user identity, roles, or a full production security review. Do not use this demo service for production-sensitive workflows.
 
 ## Provision an agent's NEAR testnet wallet binding
 

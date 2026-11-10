@@ -2,7 +2,9 @@ import express, {
   type ErrorRequestHandler,
   type Response,
 } from "express";
+import { existsSync } from "node:fs";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { extname, resolve } from "node:path";
 import { z } from "zod";
 import { SentraDatabase } from "../database/database.js";
 import { SentraService, ServiceError } from "../services/sentraService.js";
@@ -14,6 +16,8 @@ import {
 import { THREAT_SCENARIOS, ThreatLabService } from "../services/threatLabService.js";
 
 const accountIdPattern = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
+const frontendDistPath = resolve(__dirname, "../../../frontend/dist");
+const frontendIndexPath = resolve(frontendDistPath, "index.html");
 const yoctoAmountSchema = z.string().refine(
   (value) => /^\d+$/.test(value) && BigInt(value) > 0n,
 );
@@ -321,6 +325,25 @@ export function createApp(
   app.get("/api/audit", (_request, response) => {
     response.json({ data: service.listAudit() });
   });
+
+  if (existsSync(frontendIndexPath)) {
+    app.use(express.static(frontendDistPath, { index: false }));
+    app.use((request, response, next) => {
+      if (
+        request.method !== "GET" ||
+        request.path === "/api" ||
+        request.path.startsWith("/api/") ||
+        extname(request.path) !== "" ||
+        !request.accepts("html")
+      ) {
+        next();
+        return;
+      }
+      response.sendFile(frontendIndexPath, (error) => {
+        if (error) next(error);
+      });
+    });
+  }
 
   app.use((_request, response) => {
     response.status(404).json({

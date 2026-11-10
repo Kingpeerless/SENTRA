@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: sentra
+    runtime: node
+    region: frankfurt
+    plan: free
+    buildCommand: npm ci --prefix frontend && npm run build --prefix frontend && npm ci --prefix backend && npm run build --prefix backend
+    startCommand: cd backend && npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_PATH
+        value: ./data/sentra.sqlite
+      - key: SENTRA_ACCESS_TOKEN
+        sync: false

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { createApp } from "./app.js";
 import { SentraDatabase } from "../database/database.js";
@@ -10,6 +10,7 @@ import type { TransactionVerifier } from "../services/transactionAuthorizationSe
 
 const NEAR = 10n ** 24n;
 const ACCESS_TOKEN = "test-sentra-access-token";
+const frontendIndexPath = resolve(__dirname, "../../../frontend/dist/index.html");
 type JsonResponse = {
   data?: any;
   error?: { code: string; message: string };
@@ -22,6 +23,7 @@ interface Fixture {
     status: number;
     json: JsonResponse;
   }>;
+  requestText(path: string): Promise<{ status: number; text: string }>;
   close(): Promise<void>;
   database: SentraDatabase;
 }
@@ -56,6 +58,10 @@ async function createFixture(
         body: body === undefined ? undefined : JSON.stringify(body),
       });
       return { status: response.status, json: (await response.json()) as JsonResponse };
+    },
+    async requestText(path) {
+      const response = await fetch(`${baseUrl}${path}`);
+      return { status: response.status, text: await response.text() };
     },
     async close() {
       await new Promise<void>((resolve, reject) => {
@@ -112,6 +118,26 @@ test("health endpoint remains available", async () => {
     assert.equal(result.status, 200);
     assert.equal(result.json.status, "ok");
     assert.equal(result.json.message, "SENTRA backend is running");
+  });
+});
+
+test("serves the built frontend and SPA routes from the API origin", {
+  skip: !existsSync(frontendIndexPath),
+}, async () => {
+  await withFixture(async (fixture) => {
+    const root = await fixture.requestText("/");
+    const clientRoute = await fixture.requestText("/agents");
+    const missingAsset = await fixture.requestText("/assets/missing.js");
+    const unknownApi = await fixture.request("/api/not-a-route");
+
+    assert.equal(root.status, 200);
+    assert.match(root.text, /<div id="root">/);
+    assert.equal(clientRoute.status, 200);
+    assert.match(clientRoute.text, /<div id="root">/);
+    assert.equal(missingAsset.status, 404);
+    assert.doesNotMatch(missingAsset.text, /<div id="root">/);
+    assert.equal(unknownApi.status, 404);
+    assert.equal(unknownApi.json.error?.code, "NOT_FOUND");
   });
 });
 
