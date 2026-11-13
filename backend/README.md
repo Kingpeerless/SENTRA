@@ -35,6 +35,8 @@ Routes use `{ "data": ... }` for successful API responses and `{ "error": { "cod
 
 - `GET /api/health`
 - `GET /api/auth/verify` (protected; verifies the bearer token)
+- `GET /api/threat-lab/scenarios` (public; returns static scenario descriptions)
+- `POST /api/threat-lab/public-simulate` (public; evaluates one fixed synthetic scenario without database access or writes)
 - `GET|POST /api/agents`
 - `GET|PATCH /api/agents/:agentId`
 - `GET|PUT /api/agents/:agentId/policy`
@@ -47,10 +49,9 @@ Routes use `{ "data": ... }` for successful API responses and `{ "error": { "cod
 - `POST /api/approvals/:approvalId/approve`
 - `POST /api/approvals/:approvalId/reject`
 - `GET /api/audit`
-- `GET /api/threat-lab/scenarios`
 - `POST /api/threat-lab/simulate`
 
-Threat Lab uses deterministic, synthetic attack scenarios; it does not call an LLM or execute a transaction. Results are stored separately from transaction records and include the policy version used. Recipient substitution is blocked only if the substituted recipient is present in that agent's saved denylist; an ALLOW result demonstrates this policy configuration gap.
+The Public Synthetic Demo endpoints do not require a bearer token. They use fixed synthetic agent and policy values, accept only a supported scenario ID, and never access or modify database records. The authenticated `POST /api/threat-lab/simulate` endpoint uses a registered agent's saved policy and persists its result and audit event. Neither mode calls an LLM or executes a transaction. In the authenticated flow, recipient substitution is blocked only if the substituted recipient is present in that agent's saved denylist; an ALLOW result demonstrates this policy configuration gap.
 
 Transaction evaluation accepts an `agentId` and a `transaction` proposal. The proposal does not supply a policy; evaluation always uses the registered agent's saved policy.
 

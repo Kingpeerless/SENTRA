@@ -144,10 +144,17 @@ test("serves the built frontend and SPA routes from the API origin", {
 test("business endpoints reject missing and invalid bearer tokens without echoing them", async () => {
   await withFixture(async ({ request }) => {
     const missing = await request("/api/agents", "GET", undefined, null);
+    const protectedThreatLab = await request(
+      "/api/threat-lab/simulate",
+      "POST",
+      { agentId: "private-agent", scenarioId: "prompt-injection" },
+      null,
+    );
     const invalid = await request("/api/agents", "GET", undefined, "Bearer wrong-secret");
     const verified = await request("/api/auth/verify");
 
     assert.equal(missing.status, 401);
+    assert.equal(protectedThreatLab.status, 401);
     assert.equal(invalid.status, 401);
     assert.equal(verified.status, 200);
     assert.deepEqual(verified.json.data, { authenticated: true });
@@ -170,6 +177,93 @@ test("protected endpoints fail closed when SENTRA_ACCESS_TOKEN is not configured
   } finally {
     await fixture.close();
   }
+});
+
+test("anonymous users can list scenarios and run isolated public synthetic simulations", async () => {
+  await withFixture(async (fixture) => {
+    const agentId = await registerAgent(fixture);
+    const countRows = () =>
+      fixture.database.connection.prepare(`
+        SELECT
+          (SELECT count(*) FROM agents) AS agents,
+          (SELECT count(*) FROM policies) AS policies,
+          (SELECT count(*) FROM transactions) AS transactions,
+          (SELECT count(*) FROM decisions) AS decisions,
+          (SELECT count(*) FROM approvals) AS approvals,
+          (SELECT count(*) FROM audit_logs) AS audit_logs,
+          (SELECT count(*) FROM threat_simulations) AS threat_simulations,
+          (SELECT count(*) FROM authorization_intents) AS authorization_intents,
+          (SELECT count(*) FROM chain_verifications) AS chain_verifications,
+          (SELECT count(*) FROM authorization_intent_revocations) AS revocations
+      `).get();
+    const beforeCounts = countRows();
+    const beforeAgent = fixture.database.getAgent(agentId);
+    const beforePolicy = fixture.database.getCurrentPolicy(agentId);
+    const scenariosResponse = await fixture.request(
+      "/api/threat-lab/scenarios",
+      "GET",
+      undefined,
+      null,
+    );
+
+    assert.equal(scenariosResponse.status, 200);
+    assert.equal(scenariosResponse.json.data.length, 4);
+
+    const decisions = new Set<string>();
+    for (const scenarioId of [
+      "spending-limit-bypass",
+      "recipient-substitution",
+      "policy-override",
+      "prompt-injection",
+    ]) {
+      const response = await fixture.request(
+        "/api/threat-lab/public-simulate",
+        "POST",
+        { scenarioId },
+        null,
+      );
+      assert.equal(response.status, 200);
+      assert.equal(response.json.data.synthetic, true);
+      assert.equal(response.json.data.scenarioId, scenarioId);
+      assert.ok(["ALLOW", "WARN", "BLOCK"].includes(response.json.data.decision));
+      assert.equal(response.json.data.executed, false);
+      assert.equal("agentId" in response.json.data, false);
+      assert.equal("id" in response.json.data, false);
+      decisions.add(response.json.data.decision);
+    }
+
+    assert.deepEqual(decisions, new Set(["ALLOW", "WARN", "BLOCK"]));
+    assert.deepEqual(countRows(), beforeCounts);
+    assert.deepEqual(fixture.database.getAgent(agentId), beforeAgent);
+    assert.deepEqual(fixture.database.getCurrentPolicy(agentId), beforePolicy);
+  });
+});
+
+test("public synthetic simulation rejects invalid and extra input", async () => {
+  await withFixture(async ({ request }) => {
+    const unknownScenario = await request(
+      "/api/threat-lab/public-simulate",
+      "POST",
+      { scenarioId: "unknown-scenario" },
+      null,
+    );
+    const extraFields = await request(
+      "/api/threat-lab/public-simulate",
+      "POST",
+      { scenarioId: "prompt-injection", agentId: "real-agent" },
+      null,
+    );
+    const wrongShape = await request(
+      "/api/threat-lab/public-simulate",
+      "POST",
+      { scenarioId: ["prompt-injection"] },
+      null,
+    );
+
+    assert.equal(unknownScenario.status, 400);
+    assert.equal(extraFields.status, 400);
+    assert.equal(wrongShape.status, 400);
+  });
 });
 
 test("Threat Lab lists and simulates every deterministic attack scenario", async () => {

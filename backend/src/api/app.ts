@@ -13,7 +13,11 @@ import {
   TransactionAuthorizationService,
   type TransactionVerifier,
 } from "../services/transactionAuthorizationService.js";
-import { THREAT_SCENARIOS, ThreatLabService } from "../services/threatLabService.js";
+import {
+  simulatePublicThreatScenario,
+  THREAT_SCENARIOS,
+  ThreatLabService,
+} from "../services/threatLabService.js";
 
 const accountIdPattern = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
 const frontendDistPath = resolve(__dirname, "../../../frontend/dist");
@@ -112,6 +116,12 @@ const threatSimulationSchema = z
   })
   .strict();
 
+const publicThreatSimulationSchema = z.object({
+  scenarioId: z
+    .string()
+    .refine((id) => THREAT_SCENARIOS.some((scenario) => scenario.id === id)),
+}).strict();
+
 function sendValidationError(response: Response, error: z.ZodError): void {
   response.status(400).json({
     error: {
@@ -150,7 +160,13 @@ export function createApp(
   const threatLabService = new ThreatLabService(database);
   app.disable("x-powered-by");
   app.use("/api", (request, response, next) => {
-    if (request.method === "GET" && request.path === "/health") {
+    if (
+      (request.method === "GET" && (
+        request.path === "/health" ||
+        request.path === "/threat-lab/scenarios"
+      )) ||
+      (request.method === "POST" && request.path === "/threat-lab/public-simulate")
+    ) {
       next();
       return;
     }
@@ -196,6 +212,22 @@ export function createApp(
 
   app.get("/api/threat-lab/scenarios", (_request, response) => {
     response.json({ data: threatLabService.listScenarios() });
+  });
+
+  app.post("/api/threat-lab/public-simulate", (request, response) => {
+    const body = sendParsed(
+      response,
+      publicThreatSimulationSchema.safeParse(request.body),
+    );
+    if (!body) return;
+    const simulation = simulatePublicThreatScenario(body.scenarioId);
+    if (!simulation) {
+      response.status(400).json({
+        error: { code: "INVALID_INPUT", message: "Unknown Threat Lab scenario." },
+      });
+      return;
+    }
+    response.status(200).json({ data: simulation });
   });
 
   app.post("/api/threat-lab/simulate", (request, response) => {

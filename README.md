@@ -48,7 +48,7 @@ Run deterministic simulations covering:
 - Policy override attempts
 - Prompt injection
 
-The Threat Lab uses synthetic scenarios. It does not currently attack a live AI agent or invoke an LLM.
+The access screen includes a **Public Synthetic Demo** that judges can use without an operator token. It evaluates fixed synthetic inputs with the deterministic policy engine and does not read or write registered agents, policies, transactions, approvals, wallet bindings, authorization intents, or audit records. The authenticated Threat Lab remains available for simulations against saved agent policies; those results are persisted. Neither mode attacks a live AI agent or invokes an LLM.
 
 ### Authorization and Audit
 Prepare eligible saved transactions, manage short-lived one-time authorization tokens, revoke issued intents, and maintain audit records.
