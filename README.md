@@ -56,7 +56,7 @@ Prepare eligible saved transactions, manage short-lived one-time authorization t
 ### NEAR Testnet Verification
 The backend includes a read-only verifier that checks submitted transaction hashes against NEAR Testnet RPC data.
 
-## Judge Access CODE : SENTRA_ACCESS_TOKEN
+## Judge Access 
 
 **Live demo:** https://sentra-9wzc.onrender.com
 
