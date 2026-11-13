@@ -49,9 +49,7 @@ import {
 } from "./transactionApproval";
 import {
   loadThreatScenarios,
-  runPublicThreatSimulation,
   runThreatSimulation,
-  type PublicThreatSimulation,
   type ThreatScenario,
   type ThreatSimulationResult,
 } from "./threatLab";
@@ -130,10 +128,6 @@ function App() {
   const [threatLabScenarioId, setThreatLabScenarioId] = useState("");
   const [threatLabBusy, setThreatLabBusy] = useState(false);
   const [threatLabResult, setThreatLabResult] = useState<ThreatSimulationResult | null>(null);
-  const [publicDemoScenarioId, setPublicDemoScenarioId] = useState("");
-  const [publicDemoBusy, setPublicDemoBusy] = useState(false);
-  const [publicDemoError, setPublicDemoError] = useState<string | null>(null);
-  const [publicDemoResult, setPublicDemoResult] = useState<PublicThreatSimulation | null>(null);
   const walletRef = useRef<NearWalletBase | null>(null);
   const accountIdRef = useRef<string | null>(null);
   const mountedRef = useRef(false);
@@ -711,24 +705,6 @@ function App() {
     }
   };
 
-  const handlePublicDemoSimulation = async () => {
-    if (!publicDemoScenarioId || publicDemoBusy) return;
-    setPublicDemoBusy(true);
-    setPublicDemoError(null);
-    setPublicDemoResult(null);
-    try {
-      setPublicDemoResult(await runPublicThreatSimulation(
-        publicDemoScenarioId,
-      ));
-    } catch (error) {
-      setPublicDemoError(
-        error instanceof Error ? error.message : "SENTRA could not run the public demo.",
-      );
-    } finally {
-      setPublicDemoBusy(false);
-    }
-  };
-
   const handleEvaluateTransaction = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!composerAgent || composerAgent.enabled !== true || evaluationInProgressRef.current) {
@@ -860,17 +836,13 @@ function App() {
   }, [isAuthenticated]);
 
   useEffect(() => {
+    if (!isAuthenticated) return;
     let active = true;
     void loadThreatScenarios()
       .then((scenarios) => {
         if (!active) return;
         setThreatLabScenarios(scenarios);
         setThreatLabScenarioId((current) =>
-          current && scenarios.some((scenario) => scenario.id === current)
-            ? current
-            : scenarios[0]?.id ?? "",
-        );
-        setPublicDemoScenarioId((current) =>
           current && scenarios.some((scenario) => scenario.id === current)
             ? current
             : scenarios[0]?.id ?? "",
@@ -889,7 +861,7 @@ function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -1068,105 +1040,6 @@ function App() {
           </form>
         </section>
 
-        <section className="authorization-section threat-lab-section" aria-labelledby="public-demo-title">
-          <div className="binding-heading">
-            <div>
-              <span className="section-eyebrow">PUBLIC THREAT LAB</span>
-              <h2 id="public-demo-title">Public Synthetic Demo</h2>
-            </div>
-            <span className="simulation-label">NO LOGIN REQUIRED</span>
-          </div>
-          <p className="authorization-intro">
-            Explore fixed synthetic scenarios evaluated with SENTRA&apos;s deterministic policy
-            engine. This demo uses no registered agents or saved policies and does not create
-            records, authorize wallets, or execute transactions.
-          </p>
-          <div className="threat-lab-controls">
-            <label className="agent-select-label" htmlFor="public-demo-scenario">
-              Attack scenario
-            </label>
-            <select
-              id="public-demo-scenario"
-              className="agent-select"
-              value={publicDemoScenarioId}
-              onChange={(event) => {
-                setPublicDemoScenarioId(event.target.value);
-                setPublicDemoResult(null);
-                setPublicDemoError(null);
-              }}
-              disabled={threatLabScenariosLoading || threatLabScenarios.length === 0 || publicDemoBusy}
-            >
-              <option value="">
-                {threatLabScenariosLoading ? "Loading scenarios…" : "Select an attack scenario"}
-              </option>
-              {threatLabScenarios.map((scenario) => (
-                <option key={scenario.id} value={scenario.id}>{scenario.name}</option>
-              ))}
-            </select>
-            {threatLabError && <p className="error-message" role="alert">{threatLabError}</p>}
-            {publicDemoError && <p className="error-message" role="alert">{publicDemoError}</p>}
-            {!threatLabError && !threatLabScenariosLoading && threatLabScenarios.length === 0 && (
-              <p className="binding-help" role="status">No public demo scenarios are available.</p>
-            )}
-            <button
-              className="primary-button evaluate-transaction-button"
-              type="button"
-              onClick={() => void handlePublicDemoSimulation()}
-              disabled={
-                publicDemoBusy ||
-                !publicDemoScenarioId ||
-                threatLabScenariosLoading
-              }
-            >
-              {publicDemoBusy ? "Running synthetic demo…" : "Run Public Demo"}
-            </button>
-          </div>
-          {publicDemoResult && (
-            <article
-              className={`threat-simulation-result ${
-                publicDemoResult.decision === "BLOCK" ? "threat-result-blocked" : ""
-              }`}
-              role="status"
-              aria-live="polite"
-            >
-              <div className="transaction-review-heading">
-                <span className={`decision-badge decision-${publicDemoResult.decision.toLowerCase()}`}>
-                  {publicDemoResult.decision}
-                </span>
-                <span className="simulation-label">PUBLIC · SYNTHETIC</span>
-              </div>
-              <div className="transaction-review-row">
-                <span className="field-label">Simulated malicious action</span>
-                <span className="transaction-value">{publicDemoResult.simulatedResponse}</span>
-              </div>
-              <div className="transaction-review-row">
-                <span className="field-label">Synthetic proposal</span>
-                <span className="transaction-value">
-                  {publicDemoResult.proposedTransaction.recipient} ·{" "}
-                  {formatYoctoNear(publicDemoResult.proposedTransaction.amountYocto) ??
-                    publicDemoResult.proposedTransaction.amountYocto} NEAR
-                </span>
-              </div>
-              <div className="transaction-reasons">
-                <span className="field-label">Triggered policy rules</span>
-                {publicDemoResult.triggeredRules.length > 0 ? (
-                  <ul>
-                    {publicDemoResult.triggeredRules.map((rule) => (
-                      <li key={rule}><strong>{rule}</strong></li>
-                    ))}
-                  </ul>
-                ) : (
-                  <span className="transaction-value">No specific rule was triggered.</span>
-                )}
-              </div>
-              <p className="threat-simulation-explanation">{publicDemoResult.explanation}</p>
-              <p className="binding-help">
-                Synthetic only. No real agent, policy, transaction, approval, wallet binding,
-                authorization intent, or audit record was accessed or changed.
-              </p>
-            </article>
-          )}
-        </section>
       </main>
     );
   }

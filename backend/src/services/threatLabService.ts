@@ -1,5 +1,4 @@
 import {
-  DEFAULT_DEMONSTRATION_POLICY,
   evaluateTransaction,
   type Decision,
   type Policy,
@@ -19,48 +18,12 @@ export interface ThreatScenario {
   maliciousInstruction: string;
 }
 
-export interface PublicThreatSimulation {
-  synthetic: true;
-  scenarioId: ThreatScenario["id"];
-  scenarioName: string;
-  description: string;
-  maliciousInstruction: string;
-  simulatedResponse: string;
-  proposedTransaction: {
-    network: "near-testnet";
-    transactionType: "native_transfer";
-    recipient: string;
-    amountYocto: string;
-    asset: "NEAR";
-  };
-  decision: Decision;
-  reasons: string[];
-  triggeredRules: string[];
-  policyVersion: string;
-  explanation: string;
-  outcome: "blocked" | "warned" | "allowed";
-  executed: false;
-}
-
 interface ScenarioProposal {
   recipient: string;
   amountYocto: (policy: PolicyRecord) => string;
   reason: string;
   simulatedResponse: string;
 }
-
-interface PublicScenarioProposal {
-  recipient: string;
-  amountYocto: string;
-  simulatedResponse: string;
-}
-
-const YOCTO_PER_NEAR = 10n ** 24n;
-const PUBLIC_DEMO_AGENT = Object.freeze({ id: "public-synthetic-demo", enabled: true });
-const PUBLIC_DEMO_POLICY: Policy = Object.freeze({
-  ...DEFAULT_DEMONSTRATION_POLICY,
-  deniedRecipients: Object.freeze([]),
-});
 
 export const THREAT_SCENARIOS: readonly ThreatScenario[] = Object.freeze([
   {
@@ -124,33 +87,6 @@ const SCENARIO_PROPOSALS: Record<string, ScenarioProposal> = {
   },
 };
 
-const PUBLIC_SCENARIO_PROPOSALS: Record<ThreatScenario["id"], PublicScenarioProposal> = {
-  "spending-limit-bypass": {
-    recipient: "merchant.testnet",
-    amountYocto: (11n * YOCTO_PER_NEAR).toString(),
-    simulatedResponse:
-      "The synthetic agent proposes a transfer above its fixed 10 NEAR maximum.",
-  },
-  "recipient-substitution": {
-    recipient: "attacker-controlled.testnet",
-    amountYocto: "1",
-    simulatedResponse:
-      "The synthetic agent proposes a one-yocto transfer to a recipient absent from the demo denylist.",
-  },
-  "policy-override": {
-    recipient: "merchant.testnet",
-    amountYocto: (3n * YOCTO_PER_NEAR).toString(),
-    simulatedResponse:
-      "The synthetic agent proposes a 3 NEAR transfer, above the fixed approval threshold.",
-  },
-  "prompt-injection": {
-    recipient: "attacker-controlled.testnet",
-    amountYocto: (11n * YOCTO_PER_NEAR).toString(),
-    simulatedResponse:
-      "The synthetic agent proposes an over-limit transfer after an injected instruction.",
-  },
-};
-
 const SECURITY_CHECKS = [
   "AGENT_REGISTRATION: proposal agent identity is taken from the registered agent record",
   "AGENT_STATUS: deterministic engine verifies the registered agent is enabled",
@@ -183,53 +119,6 @@ function explanationFor(
     return "SENTRA returned ALLOW because the substituted recipient is not present in the saved denylist. Configure an appropriate denylist to block this target. No transaction was executed.";
   }
   return "SENTRA allowed this synthetic proposal under the current saved policy. No transaction was executed.";
-}
-
-export function simulatePublicThreatScenario(
-  scenarioId: string,
-): PublicThreatSimulation | undefined {
-  const scenario = THREAT_SCENARIOS.find((item) => item.id === scenarioId);
-  if (!scenario) return undefined;
-
-  const proposal = PUBLIC_SCENARIO_PROPOSALS[scenario.id];
-  const transaction: Transaction = {
-    agentId: PUBLIC_DEMO_AGENT.id,
-    network: "near-testnet",
-    transactionType: "native_transfer",
-    recipient: proposal.recipient,
-    amountYocto: proposal.amountYocto,
-    asset: "NEAR",
-    reason: "Fixed public synthetic demonstration proposal.",
-  };
-  const result = evaluateTransaction(transaction, PUBLIC_DEMO_AGENT, PUBLIC_DEMO_POLICY);
-
-  return {
-    synthetic: true,
-    scenarioId: scenario.id,
-    scenarioName: scenario.name,
-    description: scenario.description,
-    maliciousInstruction: scenario.maliciousInstruction,
-    simulatedResponse: proposal.simulatedResponse,
-    proposedTransaction: {
-      network: "near-testnet",
-      transactionType: "native_transfer",
-      recipient: transaction.recipient,
-      amountYocto: transaction.amountYocto,
-      asset: "NEAR",
-    },
-    decision: result.decision,
-    reasons: result.reasons,
-    triggeredRules: result.triggeredRules,
-    policyVersion: PUBLIC_DEMO_POLICY.version,
-    explanation: explanationFor(
-      result.decision,
-      result.triggeredRules,
-      PUBLIC_DEMO_POLICY.deniedRecipients.includes(transaction.recipient),
-      scenario.id,
-    ),
-    outcome: outcomeFor(result.decision),
-    executed: false,
-  };
 }
 
 export class ThreatLabService {

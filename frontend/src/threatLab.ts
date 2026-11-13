@@ -53,29 +53,6 @@ export interface ThreatSimulationResult {
   auditEvent: ThreatAuditEvent | null;
 }
 
-export interface PublicThreatSimulation {
-  synthetic: true;
-  scenarioId: ThreatScenario["id"];
-  scenarioName: string;
-  description: string;
-  maliciousInstruction: string;
-  simulatedResponse: string;
-  proposedTransaction: {
-    network: "near-testnet";
-    transactionType: "native_transfer";
-    recipient: string;
-    amountYocto: string;
-    asset: "NEAR";
-  };
-  decision: TransactionDecision;
-  reasons: string[];
-  triggeredRules: string[];
-  policyVersion: string;
-  explanation: string;
-  outcome: "blocked" | "warned" | "allowed";
-  executed: false;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -130,11 +107,11 @@ export function parseThreatScenariosResponse(payload: unknown): ThreatScenario[]
 export async function loadThreatScenarios(
   fetchImplementation: typeof fetch = fetch,
 ): Promise<ThreatScenario[]> {
-  const response = await fetchImplementation("/api/threat-lab/scenarios", {
+  const response = await authenticatedApiFetch("/api/threat-lab/scenarios", {
     method: "GET",
     headers: { accept: "application/json" },
     cache: "no-store",
-  });
+  }, fetchImplementation);
   let payload: unknown;
   try {
     payload = await response.json();
@@ -145,91 +122,6 @@ export async function loadThreatScenarios(
     throw new Error(apiError(payload, "SENTRA could not load Threat Lab scenarios."));
   }
   return parseThreatScenariosResponse(payload);
-}
-
-function parsePublicSimulation(payload: unknown): PublicThreatSimulation {
-  if (!isRecord(payload) || !isRecord(payload.data)) {
-    throw new Error("SENTRA returned an invalid public synthetic simulation response.");
-  }
-  const data = payload.data;
-  const proposal = data.proposedTransaction;
-  if (
-    ["agentId", "policyId", "transactionId", "id", "auditEvent"].some((key) => key in data) ||
-    data.synthetic !== true ||
-    !isScenarioId(data.scenarioId) ||
-    typeof data.scenarioName !== "string" ||
-    typeof data.description !== "string" ||
-    typeof data.maliciousInstruction !== "string" ||
-    typeof data.simulatedResponse !== "string" ||
-    !isRecord(proposal) ||
-    proposal.network !== "near-testnet" ||
-    proposal.transactionType !== "native_transfer" ||
-    typeof proposal.recipient !== "string" ||
-    typeof proposal.amountYocto !== "string" ||
-    proposal.asset !== "NEAR" ||
-    !["ALLOW", "WARN", "BLOCK"].includes(String(data.decision)) ||
-    !isStringArray(data.reasons) ||
-    !isStringArray(data.triggeredRules) ||
-    typeof data.policyVersion !== "string" ||
-    typeof data.explanation !== "string" ||
-    !["blocked", "warned", "allowed"].includes(String(data.outcome)) ||
-    data.executed !== false
-  ) {
-    throw new Error("SENTRA returned malformed public synthetic simulation data.");
-  }
-  return {
-    synthetic: true,
-    scenarioId: data.scenarioId,
-    scenarioName: data.scenarioName,
-    description: data.description,
-    maliciousInstruction: data.maliciousInstruction,
-    simulatedResponse: data.simulatedResponse,
-    proposedTransaction: {
-      network: "near-testnet",
-      transactionType: "native_transfer",
-      recipient: proposal.recipient,
-      amountYocto: proposal.amountYocto,
-      asset: "NEAR",
-    },
-    decision: data.decision as TransactionDecision,
-    reasons: data.reasons,
-    triggeredRules: data.triggeredRules,
-    policyVersion: data.policyVersion,
-    explanation: data.explanation,
-    outcome: data.outcome as PublicThreatSimulation["outcome"],
-    executed: false,
-  };
-}
-
-export async function runPublicThreatSimulation(
-  scenarioId: string,
-  fetchImplementation: typeof fetch = fetch,
-): Promise<PublicThreatSimulation> {
-  if (!isScenarioId(scenarioId)) {
-    throw new Error("Select a supported public synthetic scenario.");
-  }
-  const response = await fetchImplementation("/api/threat-lab/public-simulate", {
-    method: "POST",
-    headers: {
-      accept: "application/json",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ scenarioId }),
-  });
-  let payload: unknown;
-  try {
-    payload = await response.json();
-  } catch {
-    throw new Error("SENTRA returned an invalid public synthetic simulation response.");
-  }
-  if (!response.ok) {
-    throw new Error(apiError(payload, "SENTRA could not run the public synthetic simulation."));
-  }
-  const result = parsePublicSimulation(payload);
-  if (result.scenarioId !== scenarioId) {
-    throw new Error("SENTRA returned a different public synthetic scenario.");
-  }
-  return result;
 }
 
 function parseSimulation(payload: unknown, expectedAgentId: string): ThreatSimulation {

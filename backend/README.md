@@ -4,6 +4,29 @@
 
 Run `npm run dev` from this directory. The backend stores its SQLite database at `backend/data/sentra.sqlite` by default. Set `DATABASE_PATH` to use a different local file. The server uses `PORT` when set (default `3001`), binds to `127.0.0.1` locally, and binds to `0.0.0.0` when `NODE_ENV=production`.
 
+## PostgreSQL connection foundation
+
+The backend includes a PostgreSQL connection-pool module for the planned Neon migration. Configure `DATABASE_URL` in the backend process environment or as a server-side Render secret using the connection URL supplied by Neon. Keep it private: do not put it in frontend/Vite variables, source files, browser storage, or logs. Do not commit it or share it in support output.
+
+The pool validates that the value is a PostgreSQL URL with a host and database name, uses TLS certificate verification, limits the pool to five connections, and applies a 10-second connection timeout. Pool errors and startup connectivity failures are reported without printing connection details. An application can use the exported `verifyDatabaseConnection` function during startup to perform a simple connection check.
+
+The ordered PostgreSQL schema files are in `migrations/`; run them through the migration runner in a later, explicitly enabled deployment step. It records versions and checksums, runs transactionally, and uses a PostgreSQL transaction-level advisory lock to serialize concurrent runners.
+
+**Phase 2 only:** the current API, CLI, and database services still use SQLite and `DATABASE_PATH`. The PostgreSQL pool and migration runner are not wired into application startup, and setting `DATABASE_URL` does not switch the active database. No existing SQLite data is copied or discarded by these migration files. Service rewrites and a controlled production data migration remain separate follow-up work.
+
+The schema maps the ten SQLite application tables to PostgreSQL using text identifiers, exact integer `NUMERIC` values for yocto amounts, `BOOLEAN`, `JSONB`, and `TIMESTAMPTZ`. JSONB columns constrain values to the structures SENTRA writes (arrays or objects); numeric columns reject fractional and non-finite amounts. PostgreSQL also adds a partial unique index for non-null authorization transaction hashes, enforcing the uniqueness the existing service already checks, and blocks `TRUNCATE` on audit logs in addition to blocking row updates and deletes. The separate `sentra_schema_migrations` table is infrastructure metadata, not an eleventh application table.
+
+### Safe PostgreSQL integration tests
+
+The destructive migration integration suite never uses `DATABASE_URL`; it only reads `SENTRA_TEST_DATABASE_URL`. Without that variable, integration tests are skipped with an explanation. To enable them, configure a **separate, disposable PostgreSQL database** whose database name starts with `sentra_test_`, then supply all of these backend test-process variables through a local secret manager or shell environment:
+
+- `SENTRA_TEST_DATABASE_URL`: the connection URL for that disposable database.
+- `SENTRA_TEST_DATABASE_DISPOSABLE=true`: explicit approval that the database is disposable.
+- `SENTRA_TEST_DATABASE_HOST`: the exact hostname from the test URL.
+- `SENTRA_TEST_DATABASE_NAME`: the exact database name from the test URL.
+
+The suite rejects production-looking host/database names, rejects the same hostname as `DATABASE_URL` when that variable is set, creates unique random schemas, and drops only schemas whose `CREATE SCHEMA` succeeded during the current run. Never point this configuration at a production or data-bearing database. Do not put either database URL in frontend/Vite configuration or commit it.
+
 ## Shared access token
 
 Every `/api` route except `GET /api/health` requires `Authorization: Bearer <token>`. Set `SENTRA_ACCESS_TOKEN` in the backend process environment before starting the server. Generate a unique, high-entropy value (for example, `openssl rand -hex 32`) and provide it through your operating system's secret manager or deployment secret facility. Do not commit it, put it in frontend/Vite configuration, or include it in logs. The operator enters the same value on the SENTRA access screen; the frontend holds it in memory only.
@@ -35,8 +58,7 @@ Routes use `{ "data": ... }` for successful API responses and `{ "error": { "cod
 
 - `GET /api/health`
 - `GET /api/auth/verify` (protected; verifies the bearer token)
-- `GET /api/threat-lab/scenarios` (public; returns static scenario descriptions)
-- `POST /api/threat-lab/public-simulate` (public; evaluates one fixed synthetic scenario without database access or writes)
+- `GET /api/threat-lab/scenarios` (protected; returns static scenario descriptions)
 - `GET|POST /api/agents`
 - `GET|PATCH /api/agents/:agentId`
 - `GET|PUT /api/agents/:agentId/policy`
@@ -51,7 +73,7 @@ Routes use `{ "data": ... }` for successful API responses and `{ "error": { "cod
 - `GET /api/audit`
 - `POST /api/threat-lab/simulate`
 
-The Public Synthetic Demo endpoints do not require a bearer token. They use fixed synthetic agent and policy values, accept only a supported scenario ID, and never access or modify database records. The authenticated `POST /api/threat-lab/simulate` endpoint uses a registered agent's saved policy and persists its result and audit event. Neither mode calls an LLM or executes a transaction. In the authenticated flow, recipient substitution is blocked only if the substituted recipient is present in that agent's saved denylist; an ALLOW result demonstrates this policy configuration gap.
+The authenticated Threat Lab uses a registered agent's saved policy and persists its result and audit event. It does not call an LLM or execute a transaction. Recipient substitution is blocked only if the substituted recipient is present in that agent's saved denylist; an ALLOW result demonstrates this policy configuration gap.
 
 Transaction evaluation accepts an `agentId` and a `transaction` proposal. The proposal does not supply a policy; evaluation always uses the registered agent's saved policy.
 
