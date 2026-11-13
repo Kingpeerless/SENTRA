@@ -56,6 +56,25 @@ Prepare eligible saved transactions, manage short-lived one-time authorization t
 ### NEAR Testnet Verification
 The backend includes a read-only verifier that checks submitted transaction hashes against NEAR Testnet RPC data.
 
+## Judge Access
+
+**Live demo:** https://sentra-9wzc.onrender.com
+
+The live dashboard is protected by a shared access token. For judge access, please email **kingpeerless080@gmail.com** with the subject **SENTRA — NEAR HACKATHON Judge Access**. Access credentials will be provided privately to judges.
+
+The access token is intentionally not published in this repository. It grants access to protected API routes and must not be shared publicly.
+
+### Suggested evaluation flow
+
+1. Open the live demo and obtain the access token privately.
+2. Explore the Agent Registry and review the registered agent.
+3. Submit a transaction within the configured spending limit and observe the ALLOW decision.
+4. Submit a transaction exceeding the limit and observe the BLOCK decision and explanation.
+5. Open the Audit section to inspect recorded decisions.
+6. Explore the Threat Lab to review the controlled security simulations.
+
+The current implementation demonstrates deterministic policy evaluation and authorization workflows. It does not sign, broadcast, or execute transactions.
+
 ## Technology Stack
 
 - React
